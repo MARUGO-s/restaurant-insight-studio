@@ -19,7 +19,15 @@ cp .env.example .env.local
 npm run dev
 ```
 
-ローカルURLは`http://localhost:5173/restaurant-insight-studio/`です。Supabase Authのメールリンクでログインします。Redirect URLはプロジェクトのAuth URL Configurationに登録済みの`http://localhost:5173/restaurant-insight-studio/`を使います。
+ローカルURLは`http://localhost:5173/restaurant-insight-studio/`です。
+
+## ログイン
+
+IDとパスワードでログインします（Supabase Authの`signInWithPassword`）。Supabase Authはメールアドレス形式の識別子を必要とするため、`@`を含まないIDは`<ID>@id.restaurant-insight.test`へ変換して照合します（ドメインは`VITE_LOGIN_ID_DOMAIN`で変更可能）。`.test`は予約済みのドメインで、実在のメールボックスには届きません。`@`を含む入力はメールアドレスとしてそのまま使います。
+
+パスワードはSupabase Auth側だけに保存し、ソースコード・`.env`・ビルド成果物には含めません。アカウントはSupabase Dashboard → Authentication → Users → Add user → Create new user で、Emailに`<ID>@id.restaurant-insight.test`、Passwordを入力し、Auto Confirm Userを有効にして作成します。パスワードの変更も同じ画面で行います。
+
+レポート・料金・ゴミ箱はSupabaseのユーザーIDごとに分離されるため、以前のメールリンク用アカウントで作ったレポートは新しいIDアカウントには表示されません。
 
 ## Deployment checklist
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
-import { authRedirectUrl, supabase } from "./lib/supabase";
+import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
 import { invoke } from "./lib/api";
 import { IntegratedReport, TextPanel, SourceLinks } from "./ReportView";
 import { TrashPage, TrashIcon, DeleteReportDialog, reportDate } from "./ReportTrash";
@@ -212,8 +212,9 @@ export default function App() {
   const [page, setPage] = useState<Page>("analysis");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [email, setEmail] = useState("");
-  const [authMessage, setAuthMessage] = useState("");
+  const [loginId, setLoginId] = useState("");
+  const [password, setPassword] = useState("");
+  const [signingIn, setSigningIn] = useState(false);
   const [health, setHealth] = useState<Health>({ openai: false, gemini: false, xai: false });
   const [storeName, setStoreName] = useState("マルゴ四谷");
   const [storeUrl, setStoreUrl] = useState("https://marugo-waltz.com");
@@ -419,11 +420,17 @@ export default function App() {
     return () => { alive = false; subscription.unsubscribe(); activePoll.current?.controller.abort(); activePoll.current = null; currentUserId.current = null; authEpoch.current += 1; };
   }, []);
 
-  async function sendLoginLink(event: FormEvent) {
-    event.preventDefault(); setError(""); setAuthMessage("");
-    const { error: authError } = await supabase.auth.signInWithOtp({ email: email.trim(), options: { emailRedirectTo: authRedirectUrl() } });
-    if (authError) setError(authError.message);
-    else setAuthMessage("ログイン用リンクをメールで送信しました。リンクを開くとこのアプリに戻ります。");
+  async function signIn(event: FormEvent) {
+    event.preventDefault();
+    if (signingIn) return;
+    setError(""); setSigningIn(true);
+    try {
+      const { error: authError } = await supabase.auth.signInWithPassword({ email: loginEmailFromId(loginId), password });
+      if (authError) setError(/invalid login credentials/i.test(authError.message) ? "IDまたはパスワードが正しくありません。" : authError.message);
+      else setPassword("");
+    } catch {
+      setError("ログインサーバーに接続できませんでした。通信状態を確認してもう一度お試しください。");
+    } finally { setSigningIn(false); }
   }
 
   async function startAnalysis(event: FormEvent) {
@@ -482,7 +489,7 @@ export default function App() {
   }
 
   const missing = [!health.openai && "OpenAI", !health.gemini && "Gemini", !health.xai && "xAI"].filter(Boolean);
-  if (!session) return <main className="auth-screen"><div className="auth-card"><a className="brand auth-brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a><span className="eyebrow">PRIVATE RESEARCH WORKSPACE</span><h1>ログイン</h1><p>Supabaseアカウントでログインします。レポートはアカウントごとに分離して保存されます。</p><form onSubmit={sendLoginLink}><label>メールアドレス<input required type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@example.com"/></label><button className="primary-button">ログイン用リンクを送信</button></form>{authMessage && <div className="auth-success">{authMessage}</div>}{error && <div className="error-banner">{error}</div>}<small className="auth-security">メール内のリンクからログインします。パスワードはこのアプリでは扱いません。</small></div></main>;
+  if (!session) return <main className="auth-screen"><div className="auth-card"><a className="brand auth-brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a><span className="eyebrow">PRIVATE RESEARCH WORKSPACE</span><h1>ログイン</h1><p>IDとパスワードでログインします。レポートはアカウントごとに分離して保存されます。</p><form onSubmit={signIn}><label>ID<input required type="text" name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="ID"/></label><label className="auth-password">パスワード<input required type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="パスワード"/></label><button className="primary-button" disabled={signingIn}>{signingIn ? "ログイン中…" : "ログイン"}</button></form>{error && <div className="error-banner">{error}</div>}<small className="auth-security">パスワードはSupabase Authで管理され、このアプリには保存されません。</small></div></main>;
   return <div className="app-shell">
     <aside className="sidebar">
       <a className="brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a>
@@ -501,7 +508,7 @@ export default function App() {
     </aside>
 
     <main id="top" className="main-area">
-      <header className="topbar"><div><span className="eyebrow">RESTAURANT INTELLIGENCE</span><h1>{page === "costs" ? "API料金・利用量" : page === "trash" ? "ゴミ箱" : "店舗分析"}</h1></div><div className="account-chip"><span>{session.user.email}</span><button onClick={() => void supabase.auth.signOut()}>ログアウト</button></div></header>
+      <header className="topbar"><div><span className="eyebrow">RESTAURANT INTELLIGENCE</span><h1>{page === "costs" ? "API料金・利用量" : page === "trash" ? "ゴミ箱" : "店舗分析"}</h1></div><div className="account-chip"><span>{displayLoginId(session.user.email)}</span><button onClick={() => void supabase.auth.signOut()}>ログアウト</button></div></header>
       {reportNotice && <div className={`report-action-notice ${reportNotice.uncertain ? "uncertain" : "success"}`} role="status"><span>{reportNotice.text}</span>{reportNotice.uncertain && <button type="button" disabled={!!busyReportId} onClick={() => { const id = currentUserId.current; if (id) void refresh(id, authEpoch.current); void refreshTrash(); }}>一覧を更新</button>}<button type="button" aria-label="通知を閉じる" onClick={() => setReportNotice(null)}>×</button></div>}
 
       {page === "costs" ? <CostPage key={session.user.id} reports={[...reports, ...trashedReports]} costs={costs} loading={costLoading} error={costError} onRefresh={refreshCosts} /> : page === "trash" ? <TrashPage reports={trashedReports} loading={trashLoading} busy={!!busyReportId || working === "question"} error={trashError} onRestore={(report) => { void changeReport("restore_report", report); }} onDelete={setDeleteTarget} onRefresh={() => { void refreshTrash(); }} hasMore={!!trashCursor} onLoadMore={() => { void refreshTrash(true); }}/> : <div className={`content-grid ${selected ? "has-report" : ""}`}>
