@@ -1,0 +1,8 @@
+project_id = "gourmet"
+
+[functions.restaurant-analysis]
+verify_jwt = true
+
+# Validates a short-lived, single-use dispatch token through a service-only DB claim.
+[functions.restaurant-analysis-worker]
+verify_jwt = false
