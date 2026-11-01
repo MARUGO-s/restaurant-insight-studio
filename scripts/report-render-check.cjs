@@ -24,11 +24,16 @@ assert.equal((actual.match(/class="report-document-section"/g)||[]).length,repor
 for(const section of report.detailSections) assert(actual.includes(section.title.replace(/^\d{1,2}[.．、]\s*/,'')));
 assert.equal((actual.match(/class="finding-card /g)||[]).length,report.keyFindings.length);
 assert.equal((actual.match(/class="action-detail"/g)||[]).length,report.actionPlan.length);
-if(report.actionPlan.length >= 3) assert(actual.includes('まず取り組む3項目'));
-assert.equal(actual.includes('すべての施策と実行手順を見る'),report.actionPlan.length > 3);
-const inventoryRows=actual.match(/class="product-inventory">[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/)?.[1] || '';
-assert.equal((inventoryRows.match(/<tr>/g)||[]).length,report.productInventory?.length || 0,'Every acquired product must render in the inventory table');
-for(const product of report.productInventory || []) {
+const actualStoreActions=report.actionPlan.filter(action=>action.scope===undefined||action.scope==='store');
+assert.equal(actual.includes('まず取り組む3項目'),actualStoreActions.length>=3);
+assert.equal(actual.includes('すべての施策と実行手順を見る'),actualStoreActions.length>3);
+const hasReviewedInventory=report.originalProductInventory!==undefined||(report.productInventory||[]).some(p=>p.reviewStatus!==undefined);
+const inventoryRows=hasReviewedInventory
+  ? (actual.match(/<caption>照合後の商品情報<\/caption>[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/)?.[1]||'')
+  : (actual.match(/class="product-inventory">[\s\S]*?<tbody>([\s\S]*?)<\/tbody>/)?.[1]||'');
+const displayedProducts=(report.productInventory||[]).filter(p=>!hasReviewedInventory||['confirmed','corrected'].includes(p.reviewStatus));
+assert.equal((inventoryRows.match(/<tr>/g)||[]).length,displayedProducts.length,'Every adopted product must render in the correct inventory table');
+for(const product of displayedProducts) {
   assert(inventoryRows.includes(render(LinkedText,{text:product.name})),product.id);
 }
 // Prioritize the overview without changing original detail IDs or equal-priority order.

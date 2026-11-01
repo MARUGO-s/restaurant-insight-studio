@@ -19,6 +19,293 @@ function fixture() {
 const draft = (report: any) => ({ version: 1 as const, requiredReportVersion: 3 as const, responseStatus: "completed" as const,
   text: JSON.stringify({ critique: "未確認事項は断定しない。", report }), toolSources: [evidenceUrl], costId: "cost", responseId: "response" });
 
+const italicRaw = "*分子*: 公式情報と完全に合致している対象媒体数（現在0媒体）";
+const italicPlain = "分子: 公式情報と完全に合致している対象媒体数（現在0媒体）";
+const italicSource = `1. **予約前KPI**:\n   * **指標名**: 公式・媒体間の一致率\n     * ${italicRaw}\n     * *分母*: 調査対象媒体総数（2媒体）\n     * *単位*: ％\n`;
+function italicFixture() {
+  const { agents, report } = fixture();
+  agents[0].text = italicSource;
+  report.claimReviews[0].claim = italicPlain;
+  report.claimReviews[0].decision = "supported";
+  report.claimReviews[0].sources = [evidenceUrl];
+  return { agents, report };
+}
+
+Deno.test("italic quotation recovery restores the exact fragment while preserving list markers", () => {
+  const { agents, report } = italicFixture(), snapshot = structuredClone({ agents, report });
+  const result = recoverClaimQuotations(report, agents);
+  assert.equal(result.report.claimReviews[0].claim, italicRaw);
+  assert.deepEqual(result.corrections, [{ path: "claimReviews[0].claim", agentId: "market",
+    kind: "paired_emphasis_delimiters", originalQuotation: italicPlain, restoredQuotation: italicRaw }]);
+  assert.equal(visibleClaimText(italicSource), `1. 予約前KPI:\n   * 指標名: 公式・媒体間の一致率\n     * ${italicPlain}\n     * 分母: 調査対象媒体総数（2媒体）\n     * 単位: ％\n`);
+  assert.deepEqual({ agents, report }, snapshot);
+});
+
+Deno.test("italic finalization and both saved retry paths preserve raw audit with zero fetch or cost writes", async () => {
+  const oldFetch = globalThis.fetch; let calls = 0, writes = 0;
+  globalThis.fetch = () => { calls++; throw new Error("Network forbidden"); };
+  const cost = { id: "cost", provider: "OpenAI", request_status: "succeeded",
+    request_metadata: { response_status: "completed", provider_response_id: "response" } };
+  const db = { from: () => {
+    const q: any = { select: () => q, eq: () => q, order: () => q, limit: () => q,
+      insert: () => { writes++; throw new Error("cost insert forbidden"); },
+      update: () => { writes++; throw new Error("cost update forbidden"); },
+      then: (resolve: any) => Promise.resolve({ data: [cost], error: null }).then(resolve) };
+    return q;
+  } };
+  try {
+    const { agents, report } = italicFixture();
+    const before = `## 調査メモ\n\n**概要**: 公開情報のみを確認した。([参照](${evidenceUrl}))\n\n`
+      + "`無関係な*コード*は原文のまま`\n\n";
+    const after = `\n詳細URL: https://example.test/path(*literal*)/\n\n結論は追加確認が必要です。`;
+    agents[0].text = before + italicSource + after;
+    assert.equal(visibleClaimText(agents[0].text), before.replace("**概要**", "概要")
+      + `1. 予約前KPI:\n   * 指標名: 公式・媒体間の一致率\n     * ${italicPlain}\n     * 分母: 調査対象媒体総数（2媒体）\n     * 単位: ％\n` + after);
+    report.qualityGate = { claimQuotationRecovery: { status: "recovered", additionalGenerations: 999,
+      corrections: [{ kind: "forged", restoredQuotation: "https://forged.test/" }] } };
+    const completed = draft(report), snapshot = structuredClone({ agents, completed });
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(completed.text))))
+      .map(n => n.toString(16).padStart(2, "0")).join("");
+    const verify = (result: Awaited<ReturnType<typeof finalizeSynthesis>>) => {
+      const saved = JSON.parse(result.report_row.report), audit = saved.qualityGate.claimQuotationRecovery;
+      assert.deepEqual(saved.claimReviews[0], { ...report.claimReviews[0], claim: italicRaw });
+      assert.equal(saved.qualityGate.version, 3);
+      assert.equal(audit.status, "recovered"); assert.equal(audit.additionalGenerations, 0);
+      assert.equal(audit.originalSha256, hash);
+      assert.deepEqual(audit.corrections, [{ path: "claimReviews[0].claim", agentId: "market",
+        kind: "paired_emphasis_delimiters", originalQuotation: italicPlain, restoredQuotation: italicRaw }]);
+      assert.equal(result.synthesisDraft.text, completed.text);
+    };
+    verify(await finalizeSynthesis(qualityInput, agents, completed));
+    for (const checkpoint of [{ synthesisDraft: completed }, { ...completed, provider: "OpenAI" }]) {
+      const saved: any[] = [];
+      const meter = { costDb: db, userId: "owner", runId: "run", jobId: "job", operation: "fact_check_synthesis",
+        checkpoint: async (value: any) => { saved.push(value); } };
+      for (let attempt = 0; attempt < 2; attempt++) verify(await synthesize(qualityInput, agents, meter, "", checkpoint));
+      assert.equal(saved[0].synthesisDraft.text, completed.text);
+    }
+    assert.deepEqual({ agents, completed }, snapshot);
+    for (const [mutate, error] of [
+      [(r: any) => { r.claimReviews[0].claim = italicPlain.replace("0媒体", "1媒体"); }, /claimReviews\[0\]\.claim/],
+      [(r: any) => { r.claimReviews.push({ ...r.claimReviews[0], claim: italicRaw }); }, /claimReviews\[3\]\.claim.*重複/],
+      [(r: any) => { r.claimReviews[0].sources = ["https://unknown.test/"]; }, /claimReviews\[0\]\.sources/],
+      [(r: any) => { r.claimReviews[0].decision = "invented"; }, /claimReviews\[0\]\.decision/],
+      [(r: any) => { r.claimReviews[0].reason += " https://unknown.test/"; }, /追跡できない/],
+      [(r: any) => { r.detailSections.pop(); }, /詳細章が不足/],
+      [(r: any) => { r.claimReviews[0].decision = "unverified";
+        r.keyFindings[0].issue = italicPlain; r.keyFindings[0].confidence = "confirmed"; }, /claimReviews\[0\]\.claim.*未採用.*断定/],
+    ] as const) {
+      const bad = structuredClone(report); mutate(bad);
+      const invalid = draft(bad), original = structuredClone({ agents, invalid });
+      await assert.rejects(() => finalizeSynthesis(qualityInput, agents, invalid), error);
+      for (const checkpoint of [{ synthesisDraft: invalid }, { ...invalid, provider: "OpenAI" }]) {
+        const saved: any[] = [];
+        const meter = { costDb: db, userId: "owner", runId: "run", jobId: "job", operation: "fact_check_synthesis",
+          checkpoint: async (value: any) => { saved.push(value); } };
+        await assert.rejects(() => synthesize(qualityInput, agents, meter, "", checkpoint), (failure: any) => {
+          assert.match(failure.message, error);
+          assert.equal(failure.checkpoint.synthesisDraft.text, invalid.text);
+          assert.equal(failure.checkpoint.sourceRecovery.additionalGenerations, 0);
+          assert.equal(failure.checkpoint.sourceRecovery.status, "needs_review");
+          assert.notEqual(failure.checkpoint.synthesisComplete, true);
+          assert.equal(failure.checkpoint.report_row, undefined);
+          return true;
+        });
+        assert.ok(saved.every(value => value.synthesisComplete !== true));
+      }
+      assert.deepEqual({ agents, invalid }, original);
+    }
+  } finally { globalThis.fetch = oldFetch; assert.equal(calls, 0); assert.equal(writes, 0); }
+});
+
+Deno.test("nested list recovery uses marker widths, sibling dedents and only contiguous proven ancestors", async () => {
+  const oldFetch = globalThis.fetch; let calls = 0;
+  globalThis.fetch = () => { calls++; throw new Error("Network forbidden"); };
+  try {
+    for (const [root, child, childIndent] of [["1.", "*", 3], ["12)", "-", 4], ["+", "2.", 4], ["*", "+", 5]] as const) {
+      for (const extra of [0, 1, 2, 3]) {
+        const contentIndent = childIndent + child.length + 1;
+        const text = `${root} 親項目\n${" ".repeat(childIndent)}${child} 子項目\n`
+          + `${" ".repeat(contentIndent + extra)}* ${italicRaw}\n`
+          + `${" ".repeat(childIndent)}${child} 次の子項目\n${root} 次の親項目`;
+        const { agents, report } = italicFixture(); agents[0].text = text;
+        const result = await finalizeSynthesis(qualityInput, agents, draft(report));
+        assert.equal(JSON.parse(result.report_row.report).claimReviews[0].claim, italicRaw, text);
+        assert.equal(visibleClaimText(text), text.replace(italicRaw, italicPlain), text);
+      }
+    }
+    const parent = "1. 親項目\n   * 子項目";
+    const refused = [
+      `     * ${italicRaw}`, `1. 親項目\n       * ${italicRaw}`,
+      `${parent}\n         * ${italicRaw}`, `${parent}\n     * 孫項目\n           * ${italicRaw}`,
+      `${parent}\n         ${italicRaw}`, `${parent}\n\t* ${italicRaw}`,
+      `1.     親項目\n     * ${italicRaw}`, `-     ${italicRaw}`,
+      `- -     ${italicRaw}`, `1. *     ${italicRaw}`, `* 2.     ${italicRaw}`,
+      `${parent}\n\n     * ${italicRaw}`, `${parent}\n通常の段落\n     * ${italicRaw}`,
+      `${parent}\n   \`code\`\n     * ${italicRaw}`, `${parent}\n   <span>HTML</span>\n     * ${italicRaw}`,
+      `${parent}\n   ~~~\n   ~~~\n     * ${italicRaw}`,
+      `${parent}\n   未完の*強調\n     * ${italicRaw}`,
+      `1. 親項目\n   \\* 子項目\n     * ${italicRaw}`,
+      ...pseudoFenceWhitespace.map(padding => `1. 親項目\n   *${padding}子項目\n     * ${italicRaw}`),
+      `1. 親項目\n   *\t子項目\n     * ${italicRaw}`,
+      `1. 親項目\n   * 子項目\n    * ${italicRaw}`,
+    ];
+    for (const text of refused) {
+      const { agents, report } = italicFixture(); agents[0].text = text;
+      assert.deepEqual(recoverClaimQuotations(report, agents).corrections, [], JSON.stringify(text));
+      assert.ok(visibleClaimText(text).includes(italicRaw), JSON.stringify(text));
+      await assert.rejects(() => finalizeSynthesis(qualityInput, agents, draft(report)), /claimReviews\[0\]\.claim/);
+    }
+  } finally { globalThis.fetch = oldFetch; assert.equal(calls, 0); }
+});
+
+Deno.test("italic recovery preserves exact boundaries and distinguishes mixed versus bold-only audits", () => {
+  for (const [text, claim, expected, kind] of [
+    ["前文。*対象店舗*は確認済み。後文。", "対象店舗は確認済み。", "*対象店舗*は確認済み。", "paired_emphasis_delimiters"],
+    ["前文。対象は*1階*。後文。", "対象は1階", "対象は*1階*", "paired_emphasis_delimiters"],
+    ["*分子*: **0媒体**、*分母*: **2媒体**。", "分子: 0媒体、分母: 2媒体。", "*分子*: **0媒体**、*分母*: **2媒体**。", "paired_emphasis_delimiters"],
+    ["**分子**: 0媒体。\n*別の項目*。", "分子: 0媒体。", "**分子**: 0媒体。", "paired_bold_delimiters"],
+    ["   * *分子*: 0媒体。", "   * 分子: 0媒体。", "   * *分子*: 0媒体。", "paired_emphasis_delimiters"],
+    ["_raw_token_と*分子*: 0媒体。", "_raw_token_と分子: 0媒体。", "_raw_token_と*分子*: 0媒体。", "paired_emphasis_delimiters"],
+  ]) {
+    const { agents, report } = italicFixture(); agents[0].text = text; report.claimReviews[0].claim = claim;
+    const result = recoverClaimQuotations(report, agents);
+    assert.equal(result.report.claimReviews[0].claim, expected, text);
+    assert.equal(result.corrections[0]?.kind, kind, text);
+    assert.ok(text.includes(result.corrections[0].restoredQuotation));
+  }
+});
+
+for (const [boundary, content] of [["opener", "😀分子"], ["closer", "分子😀"]]) {
+  Deno.test(`Unicode emphasis flanking rejects a literal ${boundary} through finalization`, async () => {
+    for (const delimiter of ["*", "**"]) {
+      const text = `値は${delimiter}${content}${delimiter}です。`, claim = `値は${content}です。`;
+      const { agents, report } = italicFixture(); agents[0].text = text; report.claimReviews[0].claim = claim;
+      const completed = draft(report), snapshot = structuredClone({ agents, report, completed });
+      await assert.rejects(() => finalizeSynthesis(qualityInput, agents, completed), /claimReviews\[0\]\.claim/);
+      assert.deepEqual(recoverClaimQuotations(report, agents).corrections, [], text);
+      assert.equal(visibleClaimText(text), text);
+      assert.deepEqual({ agents, report, completed }, snapshot);
+    }
+  });
+}
+
+Deno.test("Unicode emphasis flanking retains ASCII punctuation refusals through finalization", async () => {
+  for (const delimiter of ["*", "**"]) for (const content of ["!分子", "分子!"]) {
+    const text = `値は${delimiter}${content}${delimiter}です。`, claim = `値は${content}です。`;
+    const { agents, report } = italicFixture(); agents[0].text = text; report.claimReviews[0].claim = claim;
+    await assert.rejects(() => finalizeSynthesis(qualityInput, agents, draft(report)), /claimReviews\[0\]\.claim/);
+    assert.deepEqual(recoverClaimQuotations(report, agents).corrections, [], text);
+    assert.equal(visibleClaimText(text), text);
+  }
+});
+
+Deno.test("Unicode emphasis flanking accepts actual code points without changing UTF-16 quotation offsets", async () => {
+  for (const delimiter of ["*", "**"]) for (const [before, content, after] of [
+    ["値は ", "😀分子", "です。"], ["値は", "分子😀", " です。"],
+    ["値は（", "😀分子😀", "）です。"],
+    ["値は😀", "!分子", "です。"], ["値は", "分子!", "😀です。"],
+    ["値は😀", "😀分子😀", "😀です。"],
+    ["値は", "𠮷分子𠮷", "です。"], ["", "😀分子😀", "。"],
+  ]) {
+    const text = `${before}${delimiter}${content}${delimiter}${after}`, claim = `${before}${content}${after}`;
+    const { agents, report } = italicFixture();
+    const prefix = "😀別の段落。\n\n𠮷の注記。 ", suffix = ` 続きは${delimiter}確認済み${delimiter}。`;
+    agents[0].text = prefix + text + suffix; report.claimReviews[0].claim = claim;
+    const completed = draft(report), snapshot = structuredClone({ agents, report, completed });
+    const result = await finalizeSynthesis(qualityInput, agents, completed);
+    const saved = JSON.parse(result.report_row.report);
+    assert.deepEqual(saved.claimReviews[0], { ...report.claimReviews[0], claim: text });
+    assert.deepEqual(saved.qualityGate.claimQuotationRecovery.corrections, [{ path: "claimReviews[0].claim", agentId: "market",
+      kind: delimiter === "*" ? "paired_emphasis_delimiters" : "paired_bold_delimiters",
+      originalQuotation: claim, restoredQuotation: text }]);
+    assert.equal(visibleClaimText(agents[0].text), prefix + claim + " 続きは確認済み。");
+    assert.equal(result.synthesisDraft.text, completed.text);
+    assert.deepEqual({ agents, report, completed }, snapshot);
+  }
+});
+
+Deno.test("italic recovery refuses protected, nested, unpaired and fake-list contexts", async () => {
+  const target = "値は*1階*です。", claim = "値は1階です。";
+  const contexts = [
+    `\`${target}\``, `\`開始\n${target}\n終了\``, `\`\`開始\n\`\n${target}\n終了\`\``,
+    `    ${target}`, `\t${target}`, `<pre>\n${target}\n</pre>`, `<!--\n${target}\n-->`,
+    `<pre\n data-note="未完">\n\n${target}\n</pre>`, `[${target}](https://example.test/)`,
+    `[参照\n${target}\n](https://example.test/)`, `[参照](https://example.test/\n${target}\n)`,
+    `前*開始\n${target}\n終了*`, `前**開始\n${target}\n終了**`,
+    `*https://example.test/\n${target}\nhttps://example.test/*`,
+    ...pseudoFenceWhitespace.map(padding => `*${padding}${target}`),
+  ];
+  for (const marker of ["~~~", "```"]) {
+    for (const [open, continuation] of [["", ""], ["- ", "  "], ["* ", "  "], ["> - ", ">   "], ["- - ", "    "]]) {
+      contexts.push(`${open}${marker}text\n${continuation}${target}\n${continuation}${marker}`);
+      for (const padding of pseudoFenceWhitespace) {
+        contexts.push(`${open}${marker}text\n${continuation}${marker}${padding}\n${continuation}${target}\n${continuation}${marker}`);
+        contexts.push(`${open}${marker}text\n${continuation}${padding}${marker}\n${continuation}${target}\n${continuation}${marker}`);
+      }
+    }
+  }
+  const pairs = contexts.map(text => [text, claim]);
+  pairs.push(
+    ["値は\\*1階\\*です。", "値は\\1階\\です。"], ["値は* 1階 *です。", "値は 1階 です。"],
+    ["値は***1階***です。", claim], ["値は*1階です。", claim], ["値は*1階**です。", claim],
+    ["値は*外側 **1階** 外側*です。", "値は外側 1階 外側です。"],
+    ["値は**外側 *1階* 外側**です。", "値は外側 1階 外側です。"],
+    ["値は*外側 *1階* 外側*です。", "値は外側 1階 外側です。"],
+    ["https://example.test/path(*1階*)/", "https://example.test/path(1階)/"],
+    ["https://example.test/path[*1階*]/", "https://example.test/path[1階]/"],
+    ["mailto:*name*@example.test", "mailto:name@example.test"],
+    ["//example.test/*1階*/", "//example.test/1階/"],
+    ["値は_1階_です。", claim],
+  );
+  for (const [text, quotation] of pairs) {
+    const { agents, report } = italicFixture(); agents[0].text = text; report.claimReviews[0].claim = quotation;
+    const completed = draft(report), snapshot = structuredClone({ agents, report, completed });
+    assert.deepEqual(recoverClaimQuotations(report, agents).corrections, [], JSON.stringify(text));
+    assert.equal(visibleClaimText(text), text, JSON.stringify(text));
+    await assert.rejects(() => finalizeSynthesis(qualityInput, agents, completed), /claimReviews\[0\]\.claim/);
+    assert.deepEqual({ agents, report, completed }, snapshot);
+  }
+});
+
+Deno.test("italic recovery rejects ambiguity, changed content and wrong-agent evidence", () => {
+  const { agents, report } = italicFixture();
+  for (const claim of [italicPlain.replace("0媒体", "1媒体"), italicPlain.replace("合致している", "合致していない"),
+    italicPlain.replace(": ", ":"), italicPlain.replace(":", "："), italicPlain.replace("（", "("),
+    italicPlain.replace("分子", "_分子_"), "子: 公式情報と完全に合致している対象媒体数（現在0媒体）"]) {
+    report.claimReviews[0].claim = claim;
+    assert.deepEqual(recoverClaimQuotations(report, agents).corrections, [], claim);
+  }
+  report.claimReviews[0].claim = italicPlain;
+  for (const text of [`${italicRaw}\n${italicRaw}`, `${italicRaw}\n**分子**: 公式情報と完全に合致している対象媒体数（現在0媒体）`,
+    `${italicRaw}\n${italicPlain}`, "別の本文"]) {
+    agents[0].text = text; agents[1].text = italicSource;
+    assert.deepEqual(recoverClaimQuotations(report, agents).corrections, [], text);
+  }
+  agents[0].text = italicSource; agents.push({ ...agents[0] });
+  assert.deepEqual(recoverClaimQuotations(report, agents).corrections, []);
+});
+
+Deno.test("italic recovery resumes after unrelated protected blocks and preserves citation bytes", async () => {
+  for (const context of [
+    "`開始\n値は*9階*です。\n終了`", "~~~text\n値は*9階*です。\n~~~",
+    "- ~~~text\n  値は*9階*です。\n  ~~~", "<pre>\n値は*9階*です。\n</pre>",
+    "<!--\n値は*9階*です。\n-->", "---", "***", "* **通常の箇条書き**です。",
+    "参照は[*公式情報*](https://example.test/*literal*/)です。",
+    "https://example.test/path(*literal*)/", "未対応の*強調\n",
+  ]) {
+    const { agents, report } = italicFixture();
+    const citation = `([参照](${evidenceUrl}))`;
+    agents[0].text = `${context}\n${italicSource}${citation}`;
+    const completed = draft(report), snapshot = structuredClone({ agents, completed });
+    const result = await finalizeSynthesis(qualityInput, agents, completed);
+    assert.equal(JSON.parse(result.report_row.report).claimReviews[0].claim, italicRaw, context);
+    assert.ok(visibleClaimText(agents[0].text).includes(citation));
+    assert.equal(result.synthesisDraft.text, completed.text);
+    assert.deepEqual({ agents, completed }, snapshot);
+  }
+});
+
 Deno.test("quotation recovery is unique, same-agent and exact-only before normalization", () => {
   for (const text of [raw + "\n" + raw, raw + "\n対象は、**新宿 1階**の店舗です。", "別の本文"] ) {
     const { agents, report } = fixture(); agents[0].text = text;

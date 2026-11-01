@@ -1,18 +1,22 @@
 type AgentText = { id: string; text: string };
-type BoldSpan = { start: number; end: number };
+type EmphasisSpan = { start: number; end: number; width: number };
 export type ClaimQuotationCorrection = {
-  path: string; agentId: string; kind: "paired_bold_delimiters";
+  path: string; agentId: string; kind: "paired_bold_delimiters" | "paired_emphasis_delimiters";
   originalQuotation: string; restoredQuotation: string;
 };
 
 // A deliberately small subset of Markdown, not a renderer. Unsupported syntax
-// stays literal. Only complete, unescaped, two-star pairs on ordinary prose
+// stays literal. Only complete, unescaped, one/two-star pairs on ordinary prose
 // lines are eligible. Never normalize spaces, punctuation, digits or words.
-function boldSpans(text: string): BoldSpan[] {
-  const spans: BoldSpan[] = [];
+function emphasisSpans(text: string): EmphasisSpan[] {
+  const spans: EmphasisSpan[] = [];
   let offset = 0, fence: { char: string; length: number; prefix: string } | undefined;
   let codeTicks = 0, uncertainEmphasis = false, htmlComment = false;
   const htmlTags: string[] = [];
+  // Only contiguous, proven ASCII list items establish container indentation.
+  // Blank/protected/unsupported lines discard the proof: this is not a full
+  // Markdown block parser and must not guess at lazy or loose continuations.
+  const listParents: { indent: number; contentIndent: number }[] = [];
   const whitespace = (c: string) => !c || /\s/u.test(c);
   const punctuation = (c: string) => /[\p{P}\p{S}]/u.test(c);
   for (const line of text.split("\n")) {
@@ -39,10 +43,12 @@ function boldSpans(text: string): BoldSpan[] {
       fence = { char: marker[0], length: marker.length,
         prefix: prefix.replace(/(?:[-+*]|\d{1,9}[.)])(?=[ \t])/g, value => " ".repeat(value.length)) };
       uncertainEmphasis = false;
+      listParents.length = 0;
       continue;
     }
     if (!inHtml && !codeTicks && (!line.trim() || /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(line))) {
       uncertainEmphasis = false;
+      listParents.length = 0;
       continue;
     }
     // Scan left-to-right so ticks inside URLs/links cannot start code, and
@@ -95,34 +101,65 @@ function boldSpans(text: string): BoldSpan[] {
         }
       }
     }
-    // A single-star list marker is structural, not cross-line emphasis.
-    prose = prose.replace(/^ {0,3}\*(?=\s)/, value => " ".repeat(value.length));
+    // A marker is eligible at 0–3 columns of its proven parent's content,
+    // never at four relative columns (indented code). Pop siblings/dedents,
+    // but do not treat a position inside an item's marker padding as a parent.
+    const item = /^( *)([-+*]|\d{1,9}[.)])( {1,4})(?=\S)/.exec(line);
+    // Same-line nested markers need their own block parsing; in particular
+    // `- -     text` is code, not prose in the first item's container.
+    const compoundItem = !!item && /^(?:[-+*]|\d{1,9}[.)])[ \t]+/.test(line.slice(item[0].length));
+    let provenItem = false;
+    if (item && !compoundItem && !hadCode && !hadHtml && !uncertainEmphasis && !/[\\\[\]<>]/.test(prose)) {
+      const indent = item[1].length;
+      while (listParents.length && indent <= listParents.at(-1)!.indent) listParents.pop();
+      const relative = indent - (listParents.at(-1)?.contentIndent ?? 0);
+      provenItem = relative >= 0 && relative <= 3;
+      if (provenItem) listParents.push({ indent, contentIndent: item[0].length });
+    }
+    if (!provenItem) listParents.length = 0;
+    // Inspect raw padding, never a projection where a URL becomes spaces.
+    // Preserve the marker itself in visible text; mask it only for pairing.
+    const listMarker = provenItem && item?.[2] === "*" ? item[1] + "*"
+      : /^ {0,3}\*(?=[ \t])/.exec(line)?.[0];
+    if (listMarker) prose = " ".repeat(listMarker.length) + prose.slice(listMarker.length);
     const runs = [...prose.matchAll(/\*+/g)];
-    const local: BoldSpan[] = [];
+    const local: EmphasisSpan[] = [];
     let valid = runs.length % 2 === 0;
     for (let i = 0; valid && i < runs.length; i += 2) {
       const open = runs[i], close = runs[i + 1];
-      const start = open.index!, end = close.index!;
-      const before = line[start - 1] ?? "", first = line[start + 2] ?? "";
-      const last = line[end - 1] ?? "", after = line[end + 2] ?? "";
-      valid = open[0] === "**" && close[0] === "**" && end > start + 2
-        && prose.slice(start, end + 2) === line.slice(start, end + 2)
+      const start = open.index!, end = close.index!, width = open[0].length;
+      // Flanking is defined on Unicode code points, while spans/projections
+      // must retain UTF-16 offsets for matchAll, slice and exact raw mapping.
+      const preceding = (index: number) => line.slice(Math.max(0, index - 2), index).match(/.$/su)?.[0] ?? "";
+      const following = (index: number) => {
+        const point = line.codePointAt(index);
+        return point === undefined ? "" : String.fromCodePoint(point);
+      };
+      const before = preceding(start), first = following(start + width);
+      const last = preceding(end), after = following(end + width);
+      valid = (width === 1 || width === 2) && close[0].length === width && end > start + width
+        && prose.slice(start, end + width) === line.slice(start, end + width)
         && !whitespace(first) && (!punctuation(first) || whitespace(before) || punctuation(before))
         && !whitespace(last) && (!punctuation(last) || whitespace(after) || punctuation(after));
-      if (valid) local.push({ start: base + start, end: base + end + 2 });
+      if (valid) local.push({ start: base + start, end: base + end + width, width });
     }
     // Unsupported emphasis can continue across soft line breaks. Refuse this
     // paragraph, not unrelated blocks; never pair delimiters across lines.
-    const unsupported = /^(?: {4}|\t)/.test(line) || /[\\\[\]<>]/.test(prose);
+    const unsupported = compoundItem || (/^(?: {4}|\t)/.test(line) && !provenItem)
+      || (!item && /^ *(?:[-+*]|\d{1,9}[.)])[ \t]+/.test(line))
+      || /[\\\[\]<>]/.test(prose);
     if (!valid || /[\[\]<>]/.test(prose) || (unsupported && runs.length)) uncertainEmphasis = true;
+    if (uncertainEmphasis || unsupported) listParents.length = 0;
     if (!hadCode && !hadHtml && !unsupported && !uncertainEmphasis) spans.push(...local);
   }
   return spans;
 }
 
 function projection(text: string) {
-  const spans = boldSpans(text), removed = new Set<number>();
-  for (const { start, end } of spans) for (const i of [start, start + 1, end - 2, end - 1]) removed.add(i);
+  const spans = emphasisSpans(text), removed = new Set<number>();
+  for (const { start, end, width } of spans) for (let i = 0; i < width; i++) {
+    removed.add(start + i); removed.add(end - 1 - i);
+  }
   const positions: number[] = [];
   let visible = "";
   for (let i = 0; i < text.length; i++) if (!removed.has(i)) { positions.push(i); visible += text[i]; }
@@ -146,7 +183,7 @@ export function recoverClaimQuotations(report: Record<string, any>, agents: Agen
     if (at < 0 || visible.indexOf(claim, at + 1) >= 0) continue;
     let start = positions[at], end = positions[at + claim.length - 1] + 1;
     const touched = spans.filter(s => s.start < end && s.end > start);
-    if (!touched.length || touched.some(s => start > s.start + 2 || end < s.end - 2)) continue;
+    if (!touched.length || touched.some(s => start > s.start + s.width || end < s.end - s.width)) continue;
     start = Math.min(start, ...touched.map(s => s.start));
     end = Math.max(end, ...touched.map(s => s.end));
     const restored = raw.slice(start, end);
@@ -154,7 +191,8 @@ export function recoverClaimQuotations(report: Record<string, any>, agents: Agen
     if (projection(restored).visible !== claim) continue;
     review.claim = restored;
     corrections.push({ path: `claimReviews[${index}].claim`, agentId: review.agentId,
-      kind: "paired_bold_delimiters", originalQuotation: claim, restoredQuotation: restored });
+      kind: touched.some(s => s.width === 1) ? "paired_emphasis_delimiters" : "paired_bold_delimiters",
+      originalQuotation: claim, restoredQuotation: restored });
   }
   return { report: candidate, corrections };
 }
