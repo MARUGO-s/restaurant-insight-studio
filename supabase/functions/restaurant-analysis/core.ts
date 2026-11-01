@@ -1,10 +1,11 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
+import { type Baseline, type ResearchPlan, type ReuseInfo, type SocialScope, researchKey, planSocialResearch, deltaInstructions, parseDelta, mergeDelta, reuseInfo } from "./social-reuse.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
 type SiteTarget = { id: string; name: string; url: string };
 type MenuItem = { id: string; name: string; price: string; conditions: string; source: string; site: string };
-type Agent = { menuInventory?: MenuItem[]; id: string; provider: string; status: "done" | "partial" | "error"; text: string; sources: string[]; error?: string };
+type Agent = { menuInventory?: MenuItem[]; reuse?: ReuseInfo; researchUpdates?: ReuseInfo[]; id: string; provider: string; status: "done" | "partial" | "error"; text: string; sources: string[]; error?: string };
 const SITE_NAMES = new Map([
   ["tabelog", "食べログ"], ["google_maps", "Google マップ"], ["hotpepper", "ホットペッパーグルメ"],
   ["gurunavi", "ぐるなび"], ["retty", "Retty"], ["ikyu", "一休.comレストラン"], ["ozmall", "OZmall"], ["hitosara", "ヒトサラ"],
@@ -157,7 +158,7 @@ function quotaDiagnostics(diagnostics: ProviderDiagnostics): string {
 class ProviderRequestError extends Error {
   constructor(message: string, public diagnostics: ProviderDiagnostics, public costId: string) { super(message); this.name = "ProviderRequestError"; }
 }
-type MeterContext = { costDb: any; userId: string; runId?: string; reportId?: string; jobId?: string; attempt?: number; operation: string; checkpoint?: (data: any) => Promise<void> };
+type MeterContext = { costDb: any; userId: string; runId?: string; reportId?: string; jobId?: string; attempt?: number; operation: string; researchMetadata?: Record<string, unknown>; checkpoint?: (data: any) => Promise<void> };
 const pricingAsOf = () => new Date().toISOString().slice(0, 10);
 const asCount = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null;
 
@@ -354,7 +355,7 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
   let latest: any = {}, httpStatus: number | null = null, providerError: ProviderDiagnostics | undefined;
   let requestPhase = "sent", transportError = "", recovered = false;
   let streamFailure: Record<string, string | number> | undefined;
-  const metadata = () => ({ ...(providerError ? { provider_error: providerError } : {}), request_phase: requestPhase,
+  const metadata = () => ({ ...meter.researchMetadata, ...(providerError ? { provider_error: providerError } : {}), request_phase: requestPhase,
     ...(transportError ? { transport_error: transportError } : {}), ...(recovered ? { reconciliation_status: "recovered" } : {}),
     response_status: latest.status ?? null, duration_ms: Date.now() - started, timeout_ms: timeoutMs, http_status: httpStatus, provider_response_id: latest.id ?? null,
     ...(latest.error ? { response_error_code: safeProviderMessage(latest.error.code, key, 100), response_error_message: safeProviderMessage(latest.error.message, key, 300) } : {}),
@@ -410,7 +411,11 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
   if (truncated && !allowEmpty && (!allowPartial || !text)) throw new Error(`${provider}の回答が途中終了しました。途中結果を保存して、この工程だけ再試行します。`);
   if (["failed", "cancelled"].includes(data?.status)) throw new Error(`${provider}の処理が完了しませんでした。利用量はAPI料金に記録しました。`);
   if (!text && !allowEmpty) throw new Error("AIから調査結果が返りませんでした");
-  return { text, sources: sourceUrls(text, collectUrls(data)), toolSources: collectUrls(data), partial: truncated, costId };
+  const xDetails = data?.usage?.server_side_tool_usage_details ?? {};
+  const xSearchPerformed = (xDetails.x_search_calls ?? 0) > 0 || (xDetails.x_posts_fetched ?? 0) > 0
+    || (data?.usage?.server_side_tool_usage?.SERVER_SIDE_TOOL_X_SEARCH ?? 0) > 0
+    || (data?.output ?? []).some((item: any) => ["x_keyword_search", "x_semantic_search"].includes(item.name ?? item.function?.name));
+  return { text, sources: sourceUrls(text, collectUrls(data)), toolSources: collectUrls(data), partial: truncated, costId, xSearchPerformed };
 }
 async function openaiResearch(id: string, prompt: string, meter: MeterContext): Promise<Agent> {
   try {
@@ -472,15 +477,76 @@ function requireResearchProviders(agents: Agent[]) {
     throw new Error("OpenAI・Gemini・Grokの3社すべての専門調査が完了していないため統合できません。未完了の調査を再開してください。");
   }
 }
-async function xaiResearch(prompt: string, meter: MeterContext): Promise<Agent> {
+async function xaiResearch(prompt: string, meter: MeterContext, options?: { plan: ResearchPlan; cacheKey: string }): Promise<Agent & { xSearchPerformed?: boolean }> {
   try {
     const key = env("XAI_API_KEY"); if (!key) throw new Error("xAI APIキーが未設定です");
     const model = env("XAI_RESEARCH_MODEL") || "grok-4.7";
     // xAI documents max_turns as the assistant/tool-call turn limit, not an individual call cap.
     // https://docs.x.ai/developers/tools/tool-usage-details#limiting-tool-call-turns
-    const result = await requestJson("https://api.x.ai/v1/responses", key, { model, input: prompt, reasoning: { effort: "low" }, tools: [{ type: "x_search" }, { type: "web_search" }], max_turns: 4, max_output_tokens: 7000, stream: true }, false, meter, 300_000, true);
+    const result = await requestJson("https://api.x.ai/v1/responses", key, { model, input: prompt, reasoning: { effort: "low" },
+      tools: [{ type: "x_search", ...(options ? { from_date: options.plan.fromDate, to_date: options.plan.toDate } : {}) }, { type: "web_search" }],
+      ...(options ? { prompt_cache_key: options.cacheKey } : {}), max_turns: 4, max_output_tokens: 7000, stream: true }, false, meter, 300_000, true);
     return { id: "social", provider: "xAI Grok", status: result.partial ? "partial" : "done", ...result };
   } catch (error) { return { id: "social", provider: "xAI Grok", status: "error", text: "", sources: [], error: clean(error instanceof Error ? error.message : error, 300) }; }
+}
+// The service-role client must always scope both reports and runs to this owner.
+async function loadSocialBaseline(db: any, run: any, scope: SocialScope): Promise<Baseline | undefined> {
+  const { data: reports, error } = await db.from("restaurant_insight_reports")
+    .select("id,run_id,user_id,created_at,deleted_at").eq("user_id", run.user_id).eq("store_url", run.input.storeUrl)
+    .is("deleted_at", null).lt("created_at", run.started_at).order("created_at", { ascending: false }).limit(20);
+  if (error) throw error;
+  for (const report of reports ?? []) {
+    if (!report.run_id || report.run_id === run.id) continue;
+    const { data: prior, error: runError } = await db.from("restaurant_insight_runs")
+      .select("id,user_id,status,input,started_at,report_deleted_at").eq("id", report.run_id).eq("user_id", run.user_id).maybeSingle();
+    if (runError) throw runError;
+    if (!prior || prior.status !== "done" || prior.report_deleted_at || researchKey(prior.input) !== researchKey(run.input)) continue;
+    const { data: jobs, error: jobError } = await db.from("restaurant_insight_jobs").select("job_key,status,output").eq("run_id", prior.id).in("job_key", [scope, "market"]);
+    if (jobError) throw jobError;
+    const saved = jobs?.find((j: any) => j.job_key === scope && j.status === "done" && j.output?.status === "done");
+    if (!saved) continue;
+    const market = jobs?.find((j: any) => j.job_key === "market" && j.status === "done");
+    // Pass prior identity evidence as context, not as current operational facts.
+    return { reportId: report.id, runId: prior.id, userId: prior.user_id, input: prior.input, startedAt: prior.started_at,
+      deletedAt: report.deleted_at, runDeletedAt: prior.report_deleted_at, runStatus: prior.status, output: saved.output,
+      identityNotes: market?.output?.text ? clean(market.output.text, 2200) : "" };
+  }
+}
+async function socialResearch(db: any, run: any, job: any, prompt: string, meter: MeterContext): Promise<Agent> {
+  // A completed answer checkpoint survives a later finish-RPC interruption.
+  // It belongs to this durable job, so recovering it starts no new generation.
+  if (job.output?.researchComplete === true && job.output?.status === "done" && job.output?.reuse?.version === 1
+    && typeof job.output.text === "string" && Array.isArray(job.output.sources)) return job.output;
+  const scope = job.job_key as SocialScope, now = new Date(), started = Date.now();
+  let baseline: Baseline | undefined, lookupFailed = false;
+  if (job.attempts === 1) {
+    try { baseline = await loadSocialBaseline(db, run, scope); } catch { lookupFailed = true; }
+  }
+  let plan = planSocialResearch(run.input, run.user_id, scope, now, baseline, job.attempts);
+  if (lookupFailed) plan.reason = "baseline_lookup_failed";
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${run.user_id}:${researchKey(run.input)}:${scope}`));
+  const cacheKey = `restaurant-v1-${Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("")}`;
+  const metadataFor = (p: ResearchPlan, fallbackReason?: string) => ({ research_version: 1, research_mode: p.mode, research_reason: p.reason,
+    baseline_report_id: p.baseline?.reportId ?? null, baseline_run_id: p.baseline?.runId ?? null,
+    full_research_at: p.fullResearchAt, search_from_date: p.fromDate ?? null, search_to_date: p.toDate,
+    ...(fallbackReason ? { full_fallback_reason: fallbackReason } : {}) });
+  const fullPrompt = (p: ResearchPlan) => `${prompt}\nX検索の担当期間（UTC）: ${p.fromDate ? `${p.fromDate} 00:00以上〜` : ""}${p.toDate} 00:00未満。期間外の投稿を現在の一般利用者体験に混ぜない。過去担当の現在の公式情報との照合にはWeb検索を使える。`;
+  const m = { ...meter, researchMetadata: metadataFor(plan) };
+  if (plan.mode === "full") {
+    const result = await xaiResearch(fullPrompt(plan), m, { plan, cacheKey });
+    return { ...result, reuse: reuseInfo(plan, result.sources) };
+  }
+  // Stable instructions and store context precede saved evidence and the changing window.
+  const delta = await xaiResearch(`${prompt}\n${deltaInstructions(plan, scope)}\n差分だけを回答し、過去ノート全文は繰り返さない。`, m, { plan, cacheKey });
+  if (delta.status !== "done") return delta; // Normal durable retry uses full research, never repeats this paid delta attempt.
+  const parsed = parseDelta(delta.text);
+  if (parsed && delta.xSearchPerformed) return { ...delta, ...mergeDelta(plan, { text: parsed.text, sources: sourceUrls(parsed.text, delta.sources) }, parsed.audit) };
+  const fallbackReason = !parsed ? "delta_quality_gate_failed" : "delta_search_not_verified";
+  if (Date.now() - started > 90_000) return { ...delta, status: "partial", error: "差分調査の品質確認が不十分なため、全範囲の調査を再開します" };
+  plan = planSocialResearch(run.input, run.user_id, scope, now, undefined, 2);
+  plan.reason = "quality_full_fallback";
+  const result = await xaiResearch(fullPrompt(plan), { ...meter, researchMetadata: metadataFor(plan, fallbackReason) }, { plan, cacheKey });
+  return { ...result, reuse: reuseInfo(plan, result.sources, undefined, fallbackReason) };
 }
 function normalizeSites(value: unknown): SiteTarget[] {
   if (!Array.isArray(value) || !value.length || value.length > 12) throw new Error("分析するグルメサイトを1〜12件選んでください");
@@ -723,16 +789,22 @@ async function executeJob(db: any, job: any, run: any) {
       const scope = recent
         ? "今回の担当範囲は直近12か月の一般利用者による対象店舗の体験です。店舗名・表記ゆれを中心にX検索を2〜4回のツールターン以内で行い、検索結果から当該店と同定できる投稿を読みます。過去・系列比較は別担当です。"
         : "今回の担当範囲は12か月より前の体験、および店舗公式の発信と利用者体験の違いです。最近の体験の再収集は別担当なので、表記ゆれ・場所の名称を使ってX検索を2〜4回のツールターン以内で行います。古い情報を現在の運用と断定しないこと。";
-      output = await xaiResearch(`${scope}\n検索で実際に見つかった投稿URL、投稿日、投稿主体、店舗同定の根拠、体験の内容、制約を調査ノートに残す。検索結果が0件なら調査した語と期間を示し、取得失敗とは区別する。長い一般論より具体的な証拠を優先し、本文2,000〜4,000字程度。\n${prompts.social}${previous}`, meter(job.job_key));
+      output = await socialResearch(db, run, job, `${scope}\n検索で実際に見つかった投稿URL、投稿日、投稿主体、店舗同定の根拠、体験の内容、制約を調査ノートに残す。検索結果が0件なら調査した語と期間を示し、取得失敗とは区別する。長い一般論より具体的な証拠を優先し、本文2,000〜4,000字程度。\n${prompts.social}${previous}`, meter(job.job_key));
     } else if (job.job_key === "synthesis") {
       const { data: rows, error } = await db.from("restaurant_insight_jobs").select("job_key,status,output").eq("run_id", run.id).neq("job_key", "synthesis");
       if (error) throw error;
       if (rows?.length !== 4 || rows.some((j: any) => j.status !== "done")) throw new Error("専門調査の完了を確認できません");
       const get = (key: string) => rows.find((j: any) => j.job_key === key)!.output as Agent;
       const recent = get("social_recent"), history = get("social_history");
-      const social: Agent = { id: "social", provider: "xAI Grok", status: "done", text: `## 最近の体験\n${recent.text}\n\n## 過去の体験・発信との比較\n${history.text}`, sources: [...new Set([...recent.sources, ...history.sources])] };
+      const updates = [recent.reuse, history.reuse].filter((value): value is ReuseInfo => !!value);
+      const social: Agent = { id: "social", provider: "xAI Grok", status: "done", researchUpdates: updates,
+        text: `調査の更新履歴（サーバー記録）: ${JSON.stringify(updates)}\n保存済み記録と今回の差分を合わせて検討する。古い体験を今回取得した声や現在の運用と断定しない。前回の反例を落とさず、更新情報と矛盾すれば時点・制約を示す。\n## 最近の体験\n${recent.text}\n\n## 過去の体験・発信との比較\n${history.text}`, sources: [...new Set([...recent.sources, ...history.sources])] };
       output = await synthesize(run.input, [get("market"), get("gourmet"), social], meter("fact_check_synthesis"), job.error_message ?? "");
     } else throw new Error("不明な工程です");
+    if (job.job_key.startsWith("social_") && output?.status === "done") {
+      output.researchComplete = true;
+      await rpc(db, "restaurant_insight_checkpoint_job", { p_job_id: job.id, p_lease_token: job.lease_token, p_output: output });
+    }
     const problem = output?.status === "error" ? output.error : output?.status === "partial" ? "調査結果が途中で終了したため、保存済みのノートから再試行します" : null;
     const retryable = !problem || !/APIキー|API key|authentication|unauthorized|permission denied/i.test(problem);
     await rpc(db, "restaurant_insight_finish_job", { p_job_id: job.id, p_lease_token: job.lease_token, p_output: output, p_error: problem, p_retryable: retryable });
@@ -895,3 +967,4 @@ export async function handleApi(req: Request) {
 export { diagnoseGemini, geminiResearch, requireResearchProviders, providerDiagnostics, quotaDiagnostics, safeProviderMessage, parseMenuInventory, parseIntegratedReport, validateReportQuality, sourceUrls, reportSourceUrls, consumeResponseStream, requestJson, readUsage, normalizeResearchFocus, buildResearchPrompts, buildSynthesisPrompt, reportWithResearchFocus, dbReport, queueAnalysis, synthesize, answerQuestion, manageReport, reportState, listTrash, parseTrashCursor };
 
 export { reconcileCosts, retrieveXaiResponse };
+export { loadSocialBaseline, socialResearch };
