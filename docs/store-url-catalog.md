@@ -28,7 +28,7 @@
 | マルゴ 新橋 | https://marugo-s.com/shinbashi/ | https://tabelog.com/tokyo/A1301/A130103/13228615/ | マルゴ 新橋 （MARUGO）のご予約 - 新橋/イタリアン ／ 食べログ |
 | マルゴ D | https://marugo-d.com/ | https://tabelog.com/aichi/A2305/A230503/23091696/ | MARUGO-Dのご予約 - 刈谷/ビストロ ／ 食べログ |
 
-## GoogleマップURL（2026-11-01確認・未公開の追加機能）
+## GoogleマップURL（2026-11-01確認・公開済み）
 
 各公式店舗ページのGoogle Mapsリンクを取得し、ログインしないChromeで実際に開いて、店名・所在地を照合した。23店舗すべて店舗固有の地図ページを確認。食べログ・公式サイトの既存対応は変更していない。検索結果URLや埋め込みiframe、gorp.jpをGoogleマップURLとして登録しない。
 
@@ -60,4 +60,4 @@
 | マルゴ 新橋 | [店舗ページ](https://www.google.co.jp/maps/place/%E3%83%9E%E3%83%AB%E3%82%B4/@35.665814,139.7564337,17z/data=!3m2!4b1!5s0x60188bea35817e09:0x7dd4f21926d8aa32!4m6!3m5!1s0x60188bc66f06aaa7:0x18b7dc63b457cebc!8m2!3d35.665814!4d139.7564337!16s%2Fg%2F11h271hn8l?entry=ttu&g_ep=EgoyMDI1MDYxNy4wIKXMDSoASAFQAw%3D%3D) | マルゴ - Google マップ | 〒105-0004 東京都港区新橋３丁目１３−４ eatus新橋 1F |
 | マルゴ D | [店舗ページ](https://www.google.com/maps/place/MARUGO-D/@34.9921637,137.0096263,17z/data=!3m1!5s0x60049cf109f7dde9:0x4296c1bd85bc787f!4m15!1m8!3m7!1s0x60049d5ac9cf498d:0x57a957f3bb74b1b8!2sMARUGO-D!8m2!3d34.9921637!4d137.0122012!10e2!16s%2Fg%2F11m5cnsycp!3m5!1s0x60049d5ac9cf498d:0x57a957f3bb74b1b8!8m2!3d34.9921637!4d137.0122012!16s%2Fg%2F11m5cnsycp?entry=ttu&g_ep=EgoyMDI1MDYyMi4wIKXMDSoASAFQAw%3D%3D) | MARUGO-D - Google マップ | 〒448-0026 愛知県刈谷市中山町２丁目 ３８番地 D 地下1階 Square |
 
-この照合は店舗ページの同定であり、口コミの全件取得やAI分析での取得成功を保証しない。Googleの画面には「表示が制限されています」の注記があるが、店舗名・所在地は表示された。公開承認前のため本番未反映。
+この照合は店舗ページの同定であり、口コミの全件取得やAI分析での取得成功を保証しない。Googleの画面には「表示が制限されています」の注記があるが、店舗名・所在地は表示された。ユーザー承認後、2026-11-01に本番反映・公開配布照合済み。

@@ -31,6 +31,8 @@ IDとパスワードでログインします（Supabase Authの`signInWithPasswo
 
 2026-11-01公開：23店舗の選択・自由入力と公式サイト／食べログURL連動、レポート品質v3を反映済み。検証・配布証跡・制限は[公開記録](docs/release-2026-11-01.md)を参照。
 
+同日追加公開：全23店舗のGoogleマップURLも選択時に自動入力。手修正・調査チェックOFF・他入力を保持。[Googleマップ公開記録](docs/release-google-maps-2026-11-01.md)を参照。
+
 ## Deployment checklist
 
 1. `supabase/migrations/`の未適用分を確認し、このアプリのmigrationだけを`gourmet`へ適用します。共有DBへの一括db pushは使いません。永続ジョブmigrationはpg_cron / pg_netを有効化し、専用dispatcherを毎分実行します。
