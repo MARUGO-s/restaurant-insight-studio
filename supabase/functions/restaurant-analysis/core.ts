@@ -161,7 +161,7 @@ type MeterContext = { costDb: any; userId: string; runId?: string; reportId?: st
 const pricingAsOf = () => new Date().toISOString().slice(0, 10);
 const asCount = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null;
 
-function readUsage(provider: string, model: string, data: any) {
+function readUsage(provider: string, model: string, data: any, pricingDate = pricingAsOf()) {
   const usage = provider === "Google Gemini" ? data?.usageMetadata : data?.usage;
   if (!usage || typeof usage !== "object") return { measurementStatus: "unknown", usage: {}, rates: {}, cost: null as number | null };
   let inputTokens: number | null = null, cachedInputTokens = 0, cacheWriteTokens = 0, outputTokens: number | null = null;
@@ -199,7 +199,7 @@ function readUsage(provider: string, model: string, data: any) {
     const factor = longContext ? 2 : 1;
     rates = { input_usd_per_million: factor, cached_input_usd_per_million: 0.05 * factor, cache_write_usd_per_million: 1.25 * factor, output_usd_per_million: longContext ? 7.5 : 5, web_search_usd_per_call: 0.01 };
   } else if (provider === "Google Gemini" && id.startsWith("gemini-3.8-flash")) {
-    const postIncrease = pricingAsOf() >= "2027-01-01";
+    const postIncrease = pricingDate >= "2027-01-01";
     rates = { input_usd_per_million: postIncrease ? 1.5 : 0.75, cached_input_usd_per_million: postIncrease ? 0.15 : 0.075, output_usd_per_million: postIncrease ? 7.5 : 3.75, google_search_usd_per_query: 0.014, google_search_included_monthly: 5000 };
   } else if (provider === "xAI" && id.startsWith("grok-4.7")) {
     const longContext = (inputTokens ?? 0) >= 200_000;
@@ -229,7 +229,8 @@ async function saveCost(context: MeterContext, id: string, provider: string, mod
     operation: context.operation, provider, model, request_status: requestStatus,
     measurement_status: requestStatus === "unknown" ? "unknown" : calculated.measurementStatus,
     usage: calculated.usage, rates: calculated.rates,
-    list_price_usd: requestStatus === "failed" ? 0 : requestStatus === "unknown" ? null : calculated.cost,
+    list_price_usd: requestStatus === "unknown" ? null : calculated.cost ??
+      (requestStatus === "failed" && [400, 401, 403, 404, 422, 429].includes(Number(metadata.http_status)) ? 0 : null),
     pricing_as_of: pricingAsOf(), request_metadata: metadata,
   };
   // The initial links are immutable. Deletion can detach them while a provider is
@@ -238,6 +239,45 @@ async function saveCost(context: MeterContext, id: string, provider: string, mod
   const { error } = insert ? await context.costDb.from("restaurant_insight_cost_events").insert({ id, ...row })
     : await context.costDb.from("restaurant_insight_cost_events").update(measurement).eq("id", id).eq("user_id", context.userId);
   if (error) throw new Error(`API利用量を保存できませんでした: ${clean(error.message, 180)}`);
+}
+
+// Reading an existing response never starts another generation.
+async function retrieveXaiResponse(key: string, responseId: unknown) {
+  if (!key || typeof responseId !== "string" || !/^[A-Za-z0-9_-]{1,180}$/.test(responseId)) return { status: "unavailable" };
+  try {
+    const response = await fetch(`https://api.x.ai/v1/responses/${encodeURIComponent(responseId)}`, {
+      headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) return { status: response.status === 404 ? "not_found" : "unavailable" };
+    const data = await response.json();
+    if (data.id !== responseId) return { status: "unavailable" };
+    if (!["completed", "incomplete", "failed", "cancelled"].includes(data.status)) return { status: "pending" };
+    return { status: "retrieved", data };
+  } catch { return { status: "unavailable" }; }
+}
+
+async function reconcileCosts(db: any, userId: string, events: any[]) {
+  const now = Date.now(), key = env("XAI_API_KEY");
+  if (!key) return;
+  const eligible = events.filter(event => event.user_id === userId && event.provider === "xAI" && event.request_status === "unknown"
+    && event.list_price_usd == null && event.request_metadata?.provider_response_id
+    && now - new Date(event.created_at).getTime() > 60_000
+    && (!event.request_metadata.reconciliation_checked_at || now - new Date(event.request_metadata.reconciliation_checked_at).getTime() > 300_000)).slice(0, 4);
+  await Promise.all(eligible.map(async event => {
+    const result = await retrieveXaiResponse(key, event.request_metadata.provider_response_id);
+    const calculated = result.data ? readUsage(event.provider, result.data.model ?? event.model, result.data, event.pricing_as_of) : null;
+    const metadata = { ...event.request_metadata, reconciliation_checked_at: new Date().toISOString(),
+      reconciliation_status: calculated?.cost != null ? "recovered" : result.status === "retrieved" ? "usage_missing" : result.status };
+    const recovered = calculated?.cost != null ? {
+      request_status: ["failed", "cancelled"].includes(result.data.status) ? "failed" : "succeeded",
+      measurement_status: calculated.measurementStatus, usage: calculated.usage, rates: calculated.rates,
+      list_price_usd: calculated.cost,
+    } : {};
+    // Preserve immutable links and any concurrent final update.
+    const { error } = await db.from("restaurant_insight_cost_events").update({ ...recovered, request_metadata: metadata })
+      .eq("id", event.id).eq("user_id", userId).eq("request_status", "unknown");
+    if (error) throw new Error("未確定の料金を再確認できませんでした");
+  }));
 }
 
 // Parse Responses API SSE incrementally, retaining only public answer text and citations.
@@ -295,7 +335,10 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
   else headers.Authorization = `Bearer ${key}`;
   const started = Date.now(), costId = crypto.randomUUID();
   let latest: any = {}, httpStatus: number | null = null, providerError: ProviderDiagnostics | undefined;
-  const metadata = () => ({ ...(providerError ? { provider_error: providerError } : {}), duration_ms: Date.now() - started, timeout_ms: timeoutMs, http_status: httpStatus, provider_response_id: latest.id ?? null,
+  let requestPhase = "sent", transportError = "", recovered = false;
+  const metadata = () => ({ ...(providerError ? { provider_error: providerError } : {}), request_phase: requestPhase,
+    ...(transportError ? { transport_error: transportError } : {}), ...(recovered ? { reconciliation_status: "recovered" } : {}),
+    response_status: latest.status ?? null, duration_ms: Date.now() - started, timeout_ms: timeoutMs, http_status: httpStatus, provider_response_id: latest.id ?? null,
     ...(provider === "Google Gemini" ? {
       finish_reasons: [...new Set((Array.isArray(latest.candidates) ? latest.candidates : []).map((candidate: any) => candidate?.finishReason).filter((reason: unknown) => typeof reason === "string" && /^[A-Z_]{1,50}$/.test(reason)))],
       usage_counts: Object.fromEntries(["promptTokenCount", "cachedContentTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "totalTokenCount", "toolUsePromptTokenCount"]
@@ -308,23 +351,34 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
   try {
     response = await fetch(target, { method: "POST", headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs) });
     httpStatus = response.status;
+    requestPhase = "receiving";
     if (response.ok && payload.stream) {
       data = await consumeResponseStream(response, async (value) => {
         latest = value;
+        await saveCost(meter, costId, provider, value.model ?? model, "unknown", value, metadata());
         const text = responseText(value), sources = sourceUrls(text, collectUrls(value));
         if (meter.checkpoint && text) await meter.checkpoint({ text, sources, toolSources: collectUrls(value), partial: true, provider, responseId: value.id ?? null });
       });
     } else data = await response.json();
     latest = data;
   } catch (error) {
-    await saveCost(meter, costId, provider, latest.model ?? model, "unknown", latest, metadata());
-    // A partial answer is checkpointed; the job manager will retry instead of calling it complete.
-    const text = responseText(latest);
-    if (allowPartial && text) return { text, sources: sourceUrls(text, collectUrls(latest)), toolSources: collectUrls(latest), partial: true };
-    throw new Error(`${provider}: ${safeProviderMessage(error instanceof Error ? error.message : error, key, 250)} (${Math.round((Date.now() - started) / 1000)}秒経過・上限${Math.round(timeoutMs / 1000)}秒)`);
+    requestPhase = "interrupted";
+    transportError = safeProviderMessage(error instanceof Error ? error.message : error, key, 300);
+    const stored = provider === "xAI" ? await retrieveXaiResponse(key, latest.id) : null;
+    if (stored?.data) {
+      latest = data = stored.data; recovered = true;
+      response = new Response(null, { status: 200 });
+    } else {
+      await saveCost(meter, costId, provider, latest.model ?? model, "unknown", latest, metadata());
+      // A partial answer is checkpointed; the job manager will retry instead of calling it complete.
+      const text = responseText(latest);
+      if (allowPartial && text) return { text, sources: sourceUrls(text, collectUrls(latest)), toolSources: collectUrls(latest), partial: true };
+      throw new Error(`${provider}: ${safeProviderMessage(error instanceof Error ? error.message : error, key, 250)} (${Math.round((Date.now() - started) / 1000)}秒経過・上限${Math.round(timeoutMs / 1000)}秒)`);
+    }
   }
+  requestPhase = "finished";
   if (!response.ok) providerError = providerDiagnostics(data?.error, response.status, key);
-  await saveCost(meter, costId, provider, data?.model ?? model, response.ok ? "succeeded" : "failed", data, metadata());
+  await saveCost(meter, costId, provider, data?.model ?? model, response.ok && !["failed", "cancelled"].includes(data?.status) ? "succeeded" : "failed", data, metadata());
   if (!response.ok) {
     const message = safeProviderMessage(data?.error?.message ?? data?.error ?? data?.message, key) || `AI APIエラー (${response.status})`;
     const diagnostics = quotaDiagnostics(providerError!);
@@ -783,8 +837,13 @@ export async function handleApi(req: Request) {
     if (input.action === "report_state") return json(await reportState(db, serviceDb(), userId, reportIdFor(input.reportId)));
     if (["trash_report", "restore_report", "delete_report"].includes(input.action)) return json(await manageReport(db, serviceDb(), userId, input));
     if (input.action === "costs") {
-      const { data: costs, error } = await db.from("restaurant_insight_cost_events").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(1000);
+      let { data: costs, error } = await db.from("restaurant_insight_cost_events").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(1000);
       if (error) throw error;
+      if (input.reconcile === true) {
+        await reconcileCosts(serviceDb(), userId, costs ?? []);
+        ({ data: costs, error } = await db.from("restaurant_insight_cost_events").select("*").eq("user_id", userId).order("created_at", { ascending: false }).limit(1000));
+        if (error) throw error;
+      }
       return json({ costs: costs ?? [] });
     }
     if (input.action === "run_status") return json(await getRunStatus(db, userId, clean(input.runId, 64)));
@@ -813,3 +872,5 @@ export async function handleApi(req: Request) {
 }
 
 export { diagnoseGemini, geminiResearch, requireResearchProviders, providerDiagnostics, quotaDiagnostics, safeProviderMessage, parseMenuInventory, parseIntegratedReport, validateReportQuality, sourceUrls, reportSourceUrls, consumeResponseStream, requestJson, readUsage, normalizeResearchFocus, buildResearchPrompts, buildSynthesisPrompt, reportWithResearchFocus, dbReport, queueAnalysis, synthesize, answerQuestion, manageReport, reportState, listTrash, parseTrashCursor };
+
+export { reconcileCosts, retrieveXaiResponse };

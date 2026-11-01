@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { consumeResponseStream, requestJson, readUsage, handleWorker } from "../functions/restaurant-analysis/core.ts";
+import { consumeResponseStream, requestJson, readUsage, handleWorker, reconcileCosts } from "../functions/restaurant-analysis/core.ts";
 const encoder = new TextEncoder();
 const frame = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
 function stream(parts: string[], broken = false) {
@@ -85,4 +85,70 @@ Deno.test("stream checkpoints retain tool provenance separately from URLs writte
     assert.deepEqual(checkpoints.at(-1).toolSources, [observed]);
     assert.deepEqual(result.toolSources, [observed]);
   } finally { globalThis.fetch = oldFetch; }
+});
+
+Deno.test("disconnect retrieves the same X response and meters it without a second generation", async () => {
+  const updates: any[] = [], requests: any[] = [];
+  const db = { from: () => ({ insert: async () => ({ error: null }), update: (row: any) => ({ eq: () => ({ eq: async () => { updates.push(row); return { error: null }; } }) }) }) };
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url: String(url), method: init?.method ?? "GET" });
+    if (init?.method === "POST") return stream([frame({ type: "response.created", response: { id: "stored-1", status: "in_progress" } })], true);
+    return Response.json({ id: "stored-1", status: "completed", model: "grok-4.7", output_text: "回収した調査結果", usage: { input_tokens: 100, output_tokens: 20 } });
+  };
+  try {
+    const result = await requestJson("https://api.x.ai/v1/responses", "test-secret", { model: "grok-4.7", stream: true }, false, { costDb: db, userId: "test", operation: "social_recent" });
+    assert.equal(result.text, "回収した調査結果");
+    assert.deepEqual(requests.map(r => r.method), ["POST", "GET"]);
+    assert.equal(requests[1].url, "https://api.x.ai/v1/responses/stored-1");
+    assert.equal(updates[0].request_metadata.provider_response_id, "stored-1");
+    assert.equal(updates.at(-1).measurement_status, "complete");
+    assert.ok(updates.at(-1).list_price_usd > 0);
+    assert.equal(updates.at(-1).request_metadata.reconciliation_status, "recovered");
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+Deno.test("terminal provider failure retains billable usage instead of forcing zero", async () => {
+  const updates: any[] = [];
+  const db = { from: () => ({ insert: async () => ({ error: null }), update: (row: any) => ({ eq: () => ({ eq: async () => { updates.push(row); return { error: null }; } }) }) }) };
+  const oldFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({ status: "failed", usage: { input_tokens: 100, output_tokens: 20 } });
+  try {
+    await assert.rejects(() => requestJson("https://api.x.ai/v1/responses", "test-secret", { model: "grok-4.7" }, false, { costDb: db, userId: "test", operation: "social_recent" }), /完了しません/);
+    assert.equal(updates.at(-1).request_status, "failed");
+    assert.ok(updates.at(-1).list_price_usd > 0);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+Deno.test("reconciliation scopes updates to owner and unknown status, preserves historical links and date", async () => {
+  const oldFetch = globalThis.fetch, oldKey = Deno.env.get("XAI_API_KEY");
+  Deno.env.set("XAI_API_KEY", "test-key");
+  const writes: any[] = [], filters: any[] = [], requests: string[] = [];
+  const db = { from: () => ({ update: (row: any) => { writes.push(row); const q = { eq: (key: string, value: string): any => { filters.push([key, value]); return q; }, then: (resolve: any) => Promise.resolve({ error: null }).then(resolve) }; return q; } }) };
+  const base = { id: "fee-1", user_id: "owner", provider: "xAI", model: "grok-4.7", request_status: "unknown", list_price_usd: null,
+    created_at: "2026-10-31T00:00:00Z", pricing_as_of: "2026-10-31", request_metadata: { provider_response_id: "stored-1" } };
+  globalThis.fetch = async (url) => { requests.push(String(url)); return Response.json({ id: "stored-1", status: "completed", usage: { input_tokens: 100, output_tokens: 20 } }); };
+  try {
+    await reconcileCosts(db, "owner", [base, { ...base, user_id: "other" }, { ...base, request_status: "succeeded" }, { ...base, request_metadata: { provider_response_id: "already-checked", reconciliation_checked_at: new Date().toISOString() } }]);
+    assert.equal(requests.length, 1);
+    assert.equal(writes[0].request_status, "succeeded");
+    assert.ok(writes[0].list_price_usd > 0);
+    assert.deepEqual(filters, [["id", "fee-1"], ["user_id", "owner"], ["request_status", "unknown"]]);
+    assert.equal("report_id" in writes[0], false);
+    assert.equal("pricing_as_of" in writes[0], false);
+  } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) Deno.env.delete("XAI_API_KEY"); else Deno.env.set("XAI_API_KEY", oldKey); }
+});
+
+Deno.test("missing stored response remains uncertain, never a zero-cost success", async () => {
+  const oldFetch = globalThis.fetch, oldKey = Deno.env.get("XAI_API_KEY");
+  Deno.env.set("XAI_API_KEY", "test-key");
+  let written: any;
+  const db = { from: () => ({ update: (row: any) => { written = row; const q = { eq: (): any => q, then: (resolve: any) => Promise.resolve({ error: null }).then(resolve) }; return q; } }) };
+  globalThis.fetch = async () => new Response(null, { status: 404 });
+  try {
+    await reconcileCosts(db, "owner", [{ id: "fee-1", user_id: "owner", provider: "xAI", request_status: "unknown", list_price_usd: null, created_at: "2026-10-31T00:00:00Z", request_metadata: { provider_response_id: "stored-1" } }]);
+    assert.equal(written.request_metadata.reconciliation_status, "not_found");
+    assert.equal("list_price_usd" in written, false);
+    assert.equal("request_status" in written, false);
+  } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) Deno.env.delete("XAI_API_KEY"); else Deno.env.set("XAI_API_KEY", oldKey); }
 });

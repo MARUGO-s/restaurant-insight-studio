@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { costExplanation } from "./lib/costs";
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
@@ -21,7 +22,9 @@ type CostEvent = {
   model: string; request_status: "succeeded" | "failed" | "unknown"; measurement_status: "complete" | "partial" | "unknown";
   usage: Record<string, number | null>; rates: Record<string, number>; list_price_usd: number | null; pricing_as_of: string; created_at: string;
   report_name?: string | null; report_created_at?: string | null; report_deleted_at?: string | null;
-  request_metadata?: { provider_error?: ProviderDiagnosticError; http_status?: number | null };
+  attempt_number?: number | null;
+  request_metadata?: { provider_error?: ProviderDiagnosticError; http_status?: number | null; duration_ms?: number; timeout_ms?: number;
+    request_phase?: string; transport_error?: string; reconciliation_status?: string };
 };
 type Health = { openai: boolean; gemini: boolean; xai: boolean };
 type Tab = "report" | "agents" | "critique";
@@ -131,7 +134,7 @@ async function waitForAnalysis(runId: string, signal: AbortSignal, onState: (sta
   onConnection("この画面での自動確認を60分で一時停止しました。調査を停止したわけではありません。「進行状況を再確認」から同じ解析の状況を確認できます。");
   return { kind: "unknown" };
 }
-function usd(value: number | null | undefined) { return value == null ? "算定できず" : `$${value.toFixed(6)}`; }
+function usd(value: number | null | undefined) { return value == null ? "料金未確定" : `$${value.toFixed(6)}`; }
 function ResearchFocusNote({ text }: { text?: string }) {
   if (!text) return null;
   return <section className="research-focus-note" aria-label="この調査で指定した重点事項"><b>この調査で指定した重点事項</b><p>{text}</p></section>;
@@ -159,7 +162,7 @@ function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onC
   </section>;
 }
 
-function CostPage({ reports, costs, loading, error, onRefresh }: { reports: Report[]; costs: CostEvent[]; loading: boolean; error: string; onRefresh: () => Promise<void> }) {
+function CostPage({ reports, costs, loading, error, onRefresh }: { reports: Report[]; costs: CostEvent[]; loading: boolean; error: string; onRefresh: (reconcile?: boolean) => Promise<void> }) {
   const startOfMonth = new Date(); startOfMonth.setDate(1); startOfMonth.setHours(0, 0, 0, 0);
   const thisMonth = costs.filter((event) => new Date(event.created_at) >= startOfMonth);
   const monthTotal = sumPrices(thisMonth);
@@ -173,14 +176,15 @@ function CostPage({ reports, costs, loading, error, onRefresh }: { reports: Repo
   const recentEvents = costs.slice(0, 80);
   const usageSummary = (event: CostEvent) => {
     const u = event.usage ?? {};
-    return [u.input_tokens != null && `入力 ${u.input_tokens.toLocaleString()} tok`, u.output_tokens != null && `出力 ${u.output_tokens.toLocaleString()} tok`, (u.web_search_calls ?? 0) > 0 && `Web検索 ${u.web_search_calls}回`, (u.google_search_queries ?? 0) > 0 && `Google検索 ${u.google_search_queries}件`, (u.x_posts_fetched ?? 0) > 0 && `X投稿 ${u.x_posts_fetched}件`, (u.x_users_fetched ?? 0) > 0 && `Xプロフィール ${u.x_users_fetched}件`].filter(Boolean).join(" · ") || "APIから利用量の詳細が返りませんでした";
+    return [u.input_tokens != null && `入力 ${u.input_tokens.toLocaleString()} tok`, u.output_tokens != null && `出力 ${u.output_tokens.toLocaleString()} tok`, (u.web_search_calls ?? 0) > 0 && `Web検索 ${u.web_search_calls}回`, (u.google_search_queries ?? 0) > 0 && `Google検索 ${u.google_search_queries}件`, (u.x_posts_fetched ?? 0) > 0 && `X投稿 ${u.x_posts_fetched}件`, (u.x_users_fetched ?? 0) > 0 && `Xプロフィール ${u.x_users_fetched}件`].filter(Boolean).join(" · ") || "最終利用量の記録なし";
   };
   return <section className="cost-page">
     <div className="cost-page-heading"><div><span className="eyebrow">API USAGE & COST</span><h2>API料金・利用量</h2><p>AIのAPI応答ごとに、返却されたトークン数と検索件数から費用を積算します。</p></div><span className="cost-currency">USD · 公式標準単価</span></div>
-    <div className="cost-disclosure"><b>請求書の確定額ではなく、実測利用量 × 単価による積算です。</b><span>無料枠、契約割引、税、為替、プロバイダー側の後日調整は含みません。単価が未登録、またはAPIが利用量を返さなかった呼び出しは「算定できず」として区別します。金額が小さい場合も6桁で表示します。料金記録の導入前に実行した過去の分析は利用量を遡って取得できないため、ここには表示されません。</span></div>
+    <div className="cost-disclosure"><b>請求書の確定額ではなく、実測利用量 × 単価による積算です。</b><span>無料枠、契約割引、税、為替、プロバイダー側の後日調整は含みません。通信中断、利用量の不足、単価未登録の呼び出しは「料金未確定」として理由を表示します。未確定は無料という意味ではありません。金額が小さい場合も6桁で表示します。料金記録の導入前に実行した過去の分析は利用量を遡って取得できないため、ここには表示されません。</span></div>
     {error && <div className="error-banner">{error}</div>}
+    {incompleteCount > 0 && <div className="run-connection-notice"><p>未確定分は、完了した調査とは別の試行を含みます。再確認ではxAIの保存済み応答を最大4件取得し、新しい調査は開始しません。再確認の間隔は5分です。取得できない分は合計に含めません。</p><button type="button" className="run-check-button" disabled={loading} onClick={() => { void onRefresh(true); }}>{loading ? "確認しています…" : "未確定分を再確認"}</button></div>}
     <GeminiConnectionCheck onRefresh={onRefresh}/>
-    <div className="cost-metrics"><article className="panel"><span>今月の標準料金積算</span><b>{usd(monthTotal)}</b><small>{incompleteCount ? `算定できない呼び出し ${incompleteCount}件を除く` : "APIの返却値を記録済み"}</small></article><article className="panel"><span>分析実行数</span><b>{analysisRuns.toLocaleString()}回</b><small>失敗した実行も含む・現在表示できる履歴</small></article><article className="panel"><span>質問への回答</span><b>{usd(questionTotal)}</b><small>今月のレポート質問分</small></article></div>
+    <div className="cost-metrics"><article className="panel"><span>今月の標準料金積算</span><b>{usd(monthTotal)}</b><small>{incompleteCount ? `料金未確定 ${incompleteCount}件を除く` : "APIの返却値を記録済み"}</small></article><article className="panel"><span>分析実行数</span><b>{analysisRuns.toLocaleString()}回</b><small>失敗した実行も含む・現在表示できる履歴</small></article><article className="panel"><span>質問への回答</span><b>{usd(questionTotal)}</b><small>今月のレポート質問分</small></article></div>
     <article className="panel cost-section"><header><div><span className="panel-kicker">ANALYSIS RUNS</span><h3>1回ごとの分析費用</h3></div></header>
       {loading ? <p className="muted">利用量を読み込んでいます…</p> : !analysisRows.length ? <p className="muted">費用記録はまだありません。次回の分析実行から、AIごとの利用量を記録します。</p> : <div className="cost-run-list">{analysisRows.map(([runId, events]) => {
         const report = reportByRun.get(runId); const known = events.every((event) => event.list_price_usd != null); const total = sumPrices(events);
@@ -190,7 +194,7 @@ function CostPage({ reports, costs, loading, error, onRefresh }: { reports: Repo
       })}</div>}
     </article>
     <article className="panel cost-section"><header><div><span className="panel-kicker">REQUEST LEDGER</span><h3>API呼び出し明細</h3></div></header>
-      {!recentEvents.length ? <p className="muted">API呼び出しの記録はまだありません。</p> : <div className="cost-event-list">{recentEvents.map((event) => <div className="cost-event" key={event.id}><div className="cost-event-main"><b>{operationNames[event.operation] ?? event.operation}</b><small>{event.provider} · {event.model} · {dateLabel(event.created_at)}</small><small>{usageSummary(event)}</small>{event.request_metadata?.provider_error && <details className="provider-error-disclosure"><summary>提供元が返したエラーの詳細</summary><ProviderErrorDetails error={event.request_metadata.provider_error}/></details>}</div><div className="cost-event-price"><b>{usd(event.list_price_usd)}</b><small>{event.request_status === "failed" ? "失敗" : event.measurement_status === "complete" ? "利用量を計測" : "利用量に不明点あり"} · 単価 {event.pricing_as_of}</small></div></div>)}</div>}
+      {!recentEvents.length ? <p className="muted">API呼び出しの記録はまだありません。</p> : <div className="cost-event-list">{recentEvents.map((event) => <div className="cost-event" key={event.id}><div className="cost-event-main"><b>{operationNames[event.operation] ?? event.operation}</b><small>{event.provider} · {event.model} · {dateLabel(event.created_at)}{event.attempt_number ? ` · 試行${event.attempt_number}回目` : ""}</small><small>{usageSummary(event)}</small>{costExplanation(event).reason && <small>{costExplanation(event).reason}</small>}{event.request_metadata?.transport_error && <details className="provider-error-disclosure"><summary>中断理由の詳細</summary><p>{event.request_metadata.transport_error}</p></details>}{event.request_metadata?.provider_error && <details className="provider-error-disclosure"><summary>提供元が返したエラーの詳細</summary><ProviderErrorDetails error={event.request_metadata.provider_error}/></details>}</div><div className="cost-event-price"><b>{usd(event.list_price_usd)}</b><small>{costExplanation(event).label} · 単価 {event.pricing_as_of}</small></div></div>)}</div>}
     </article>
     <article className="panel cost-section"><header><div><span className="panel-kicker">PRICE SOURCES</span><h3>単価の参照先</h3></div></header><div className="cost-sources"><a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noreferrer">OpenAI API料金 ↗</a><a href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noreferrer">Gemini API料金 ↗</a><a href="https://docs.x.ai/developers/pricing" target="_blank" rel="noreferrer">xAI API料金 ↗</a><a href="https://docs.x.ai/developers/tools/x-search" target="_blank" rel="noreferrer">xAI X Search料金 ↗</a></div></article>
   </section>;
@@ -332,12 +336,12 @@ export default function App() {
       if (current()) { reportMutation.current = false; setBusyReportId(null); setDeleteTarget(null); }
     }
   }
-  async function refreshCosts() {
+  async function refreshCosts(reconcile = false) {
     const userId = currentUserId.current, epoch = authEpoch.current;
     const current = () => userId && currentUserId.current === userId && authEpoch.current === epoch;
     if (!userId) return;
     setCostLoading(true); setCostError("");
-    try { const result = await invoke<{ costs: CostEvent[] }>({ action: "costs" }); if (current()) setCosts(result.costs); }
+    try { const result = await invoke<{ costs: CostEvent[] }>({ action: "costs", reconcile }); if (current()) setCosts(result.costs); }
     catch (e) { if (current()) setCostError(e instanceof Error ? e.message : "料金履歴を読み込めませんでした"); }
     finally { if (current()) setCostLoading(false); }
   }
