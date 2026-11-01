@@ -267,6 +267,9 @@ async function reconcileCosts(db: any, userId: string, events: any[]) {
     const result = await retrieveXaiResponse(key, event.request_metadata.provider_response_id);
     const calculated = result.data ? readUsage(event.provider, result.data.model ?? event.model, result.data, event.pricing_as_of) : null;
     const metadata = { ...event.request_metadata, reconciliation_checked_at: new Date().toISOString(),
+      ...(result.data ? { retrieved_response_status: clean(result.data.status, 50),
+        ...(result.data.error ? { retrieved_error_code: safeProviderMessage(result.data.error.code, key, 100),
+          retrieved_error_message: safeProviderMessage(result.data.error.message, key, 300) } : {}) } : {}),
       reconciliation_status: calculated?.cost != null ? "recovered" : result.status === "retrieved" ? "usage_missing" : result.status };
     const recovered = calculated?.cost != null ? {
       request_status: ["failed", "cancelled"].includes(result.data.status) ? "failed" : "succeeded",
@@ -282,6 +285,9 @@ async function reconcileCosts(db: any, userId: string, events: any[]) {
 
 // Parse Responses API SSE incrementally, retaining only public answer text and citations.
 // Hidden reasoning is never copied into reports, logs or checkpoint storage.
+class StreamFailure extends Error {
+  constructor(message: string, public diagnostics: Record<string, string | number>) { super(message); this.name = "StreamFailure"; }
+}
 async function consumeResponseStream(response: Response, onProgress: (data: any) => Promise<void>) {
   if (!response.body) throw new Error("AIの応答ストリームがありません");
   const reader = response.body.getReader(), decoder = new TextDecoder();
@@ -289,22 +295,32 @@ async function consumeResponseStream(response: Response, onProgress: (data: any)
   const completedItems = new Map<string, any>();
   const urls = new Set<string>();
   let terminal = false, lastSaved = 0;
-  const snapshot = () => ({ ...latest, output: completedItems.size ? [...completedItems.values()] : latest.output, output_text: responseText(latest) || text, checkpoint_urls: [...urls].map(url => ({ url })) });
+  let frames = 0, bytes = 0, lastEvent = "", checkpointFailures = 0, failureKind = "none";
+  const diagnostics = () => ({ frames_received: frames, bytes_received: bytes, last_event_type: lastEvent, checkpoint_failures: checkpointFailures, failure_kind: failureKind });
+  const snapshot = () => ({ ...latest, stream_diagnostics: diagnostics(), output: completedItems.size ? [...completedItems.values()] : latest.output, output_text: responseText(latest) || text, checkpoint_urls: [...urls].map(url => ({ url })) });
+  async function checkpoint() {
+    try { await onProgress(snapshot()); }
+    catch { checkpointFailures += 1; } // An observer failure must not terminate a healthy provider stream.
+  }
   async function consume(frame: string) {
     const raw = frame.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart()).join("\n");
     if (!raw || raw === "[DONE]") return;
-    let event: any; try { event = JSON.parse(raw); } catch { throw new Error("AI応答ストリームの形式を読み取れません"); }
+    let event: any; try { event = JSON.parse(raw); } catch { failureKind = "parse_error"; throw new Error("AI応答ストリームの形式を読み取れません"); }
+    if (!event || typeof event !== "object" || Array.isArray(event)) { failureKind = "parse_error"; throw new Error("AI応答のイベント形式が不正です"); }
+    frames += 1;
+    lastEvent = typeof event?.type === "string" && /^[a-zA-Z0-9_.-]{1,100}$/.test(event.type) ? event.type : "unknown";
     if (event.response) latest = { ...latest, ...event.response };
     if (event.type === "response.output_text.delta") text += event.delta ?? "";
     if (event.type === "response.output_item.done" && event.item) completedItems.set(event.item.id ?? String(event.output_index), event.item);
     collectUrls(event).forEach(u => urls.add(u));
     if (["response.completed", "response.incomplete", "response.failed"].includes(event.type)) terminal = true;
-    if (event.type === "error") throw new Error(clean(event.message ?? event.error?.message, 300) || "AIのストリーム処理が中断しました");
-    if (terminal || Date.now() - lastSaved >= 15_000) { await onProgress(snapshot()); lastSaved = Date.now(); }
+    if (event.type === "error") { failureKind = "provider_stream_error"; throw new Error(clean(event.message ?? event.error?.message, 300) || "AIのストリーム処理が中断しました"); }
+    if (terminal || Date.now() - lastSaved >= 15_000) { await checkpoint(); lastSaved = Date.now(); }
   }
   try {
     while (true) {
       const part = await reader.read();
+      bytes += part.value?.byteLength ?? 0;
       buffer += decoder.decode(part.value, { stream: !part.done });
       let boundary: RegExpExecArray | null;
       while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
@@ -313,15 +329,16 @@ async function consumeResponseStream(response: Response, onProgress: (data: any)
         if (terminal) break;
       }
       if (terminal) { await reader.cancel().catch(() => {}); break; }
-      if (buffer.length > 4_000_000) throw new Error("AI応答が処理上限を超えました");
+      if (buffer.length > 4_000_000) { failureKind = "resource_limit"; throw new Error("AI応答が処理上限を超えました"); }
       if (part.done) break;
     }
     if (!terminal && buffer.trim()) await consume(buffer);
-    if (!terminal) throw new Error("AI応答ストリームが完了通知前に切断されました");
+    if (!terminal) { failureKind = "premature_eof"; throw new Error("AI応答ストリームが完了通知前に切断されました"); }
     return snapshot();
   } catch (error) {
-    await onProgress(snapshot());
-    throw error;
+    if (failureKind === "none") failureKind = "transport_error";
+    await checkpoint();
+    throw new StreamFailure(error instanceof Error ? error.message : "AI応答の受信に失敗しました", diagnostics());
   } finally { reader.releaseLock(); }
 }
 
@@ -336,9 +353,12 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
   const started = Date.now(), costId = crypto.randomUUID();
   let latest: any = {}, httpStatus: number | null = null, providerError: ProviderDiagnostics | undefined;
   let requestPhase = "sent", transportError = "", recovered = false;
+  let streamFailure: Record<string, string | number> | undefined;
   const metadata = () => ({ ...(providerError ? { provider_error: providerError } : {}), request_phase: requestPhase,
     ...(transportError ? { transport_error: transportError } : {}), ...(recovered ? { reconciliation_status: "recovered" } : {}),
     response_status: latest.status ?? null, duration_ms: Date.now() - started, timeout_ms: timeoutMs, http_status: httpStatus, provider_response_id: latest.id ?? null,
+    ...(latest.error ? { response_error_code: safeProviderMessage(latest.error.code, key, 100), response_error_message: safeProviderMessage(latest.error.message, key, 300) } : {}),
+    ...(streamFailure || latest.stream_diagnostics ? { stream_diagnostics: streamFailure ?? latest.stream_diagnostics } : {}),
     ...(provider === "Google Gemini" ? {
       finish_reasons: [...new Set((Array.isArray(latest.candidates) ? latest.candidates : []).map((candidate: any) => candidate?.finishReason).filter((reason: unknown) => typeof reason === "string" && /^[A-Z_]{1,50}$/.test(reason)))],
       usage_counts: Object.fromEntries(["promptTokenCount", "cachedContentTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "totalTokenCount", "toolUsePromptTokenCount"]
@@ -362,6 +382,7 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
     } else data = await response.json();
     latest = data;
   } catch (error) {
+    if (error instanceof StreamFailure) streamFailure = error.diagnostics;
     requestPhase = "interrupted";
     transportError = safeProviderMessage(error instanceof Error ? error.message : error, key, 300);
     const stored = provider === "xAI" ? await retrieveXaiResponse(key, latest.id) : null;

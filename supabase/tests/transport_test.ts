@@ -152,3 +152,23 @@ Deno.test("missing stored response remains uncertain, never a zero-cost success"
     assert.equal("request_status" in written, false);
   } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) Deno.env.delete("XAI_API_KEY"); else Deno.env.set("XAI_API_KEY", oldKey); }
 });
+
+Deno.test("checkpoint failure cannot discard a healthy terminal response and usage", async () => {
+  const response = stream([frame({ type: "response.created", response: { id: "stored-1" } }), frame({ type: "response.completed", response: { status: "completed", output_text: "finished", usage: { input_tokens: 100, output_tokens: 20 } } })]);
+  const result = await consumeResponseStream(response, async () => { throw new Error("database temporarily unavailable"); });
+  assert.equal(result.status, "completed");
+  assert.equal(result.usage.output_tokens, 20);
+  assert.ok(result.stream_diagnostics.checkpoint_failures > 0);
+});
+
+Deno.test("provider, parse and early EOF failures have distinct diagnostics without response bodies", async () => {
+  for (const [body, kind] of [[frame({ type: "error", message: "upstream unavailable" }), "provider_stream_error"], ["data: {bad JSON}\n\n", "parse_error"], [frame({ type: "response.created", response: { id: "stored-1" } }), "premature_eof"]]) {
+    await assert.rejects(() => consumeResponseStream(stream([body]), async () => { throw new Error("checkpoint also failed"); }), (error: any) => {
+      assert.equal(error.diagnostics.failure_kind, kind);
+      assert.ok(error.diagnostics.bytes_received > 0);
+      assert.ok(error.diagnostics.checkpoint_failures > 0);
+      assert.equal(JSON.stringify(error.diagnostics).includes("upstream unavailable"), false);
+      return true;
+    });
+  }
+});
