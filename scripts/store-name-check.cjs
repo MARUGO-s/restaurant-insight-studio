@@ -13,7 +13,12 @@ mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'), {compilerOptions:{
 const {StoreNameInput, STORE_NAMES, storeNameOptions, STORE_CATALOG, officialStoreUrl} = mod.exports;
 assert(Array.isArray(STORE_CATALOG), '店舗ごとの公式URL定義が必要');
 assert.equal(STORE_CATALOG.length, 23);
-for(const shop of STORE_CATALOG) {
+assert.equal(new Set(STORE_CATALOG.map(store => store.googleMapsUrl)).size, 23, 'maps URLs identify distinct stores');
+for (const shop of STORE_CATALOG) {
+  const maps = new URL(shop.googleMapsUrl);
+  assert.equal(maps.protocol, 'https:');
+  assert.ok(['www.google.com', 'www.google.co.jp', 'maps.app.goo.gl', 'maps.google.com'].includes(maps.hostname), shop.name);
+  assert.ok(!shop.googleMapsUrl.includes('/maps/embed'), 'use a navigable Maps page, not an iframe');
  assert.equal(new URL(shop.url).protocol,'https:');
  assert.match(shop.tabelogUrl,/^https:\/\/tabelog\.com\/(tokyo|aichi)\/A\d+\/A\d+\/\d+\/$/);
 }
@@ -40,4 +45,4 @@ const app = fs.readFileSync(path.join(root,'src/App.tsx'),'utf8');
 assert(app.includes('<StoreNameInput value={storeName} onChange={setStoreName}'), '既存stateへ接続');
 assert(app.includes('setStoreUrl(store.url)'));
 assert(app.includes('...urls, tabelog: store.tabelogUrl'));
-console.log('PASS: 23 official/tabelog pairs, filtering, editable field, App URL state wiring');
+console.log('PASS: 23 official/Tabelog/Google Maps URL triples, filtering, editable field, App URL state wiring');

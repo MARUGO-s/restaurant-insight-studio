@@ -227,7 +227,10 @@ export default function App() {
   const [groupName, setGroupName] = useState("マルゴグループ");
   const [researchFocus, setResearchFocus] = useState("");
   const [selectedSiteIds, setSelectedSiteIds] = useState<string[]>(["tabelog"]);
-  const [siteUrls, setSiteUrls] = useState<Record<string, string>>(() => ({ tabelog: STORE_CATALOG.find(store => store.url === officialStoreUrl("マルゴ四谷"))?.tabelogUrl ?? "" }));
+  const [siteUrls, setSiteUrls] = useState<Record<string, string>>(() => {
+    const store = STORE_CATALOG.find(store => store.url === officialStoreUrl("マルゴ四谷"));
+    return { tabelog: store?.tabelogUrl ?? "", google_maps: store?.googleMapsUrl ?? "" };
+  });
   const [customSites, setCustomSites] = useState<{ id: string; name: string; url: string }[]>([]);
   const [question, setQuestion] = useState("");
   const [tab, setTab] = useState<Tab>("report");
@@ -535,7 +538,7 @@ export default function App() {
             <p className="muted form-intro">専門分野の異なる3つのAIが調査し、根拠を確認してひとつの改善レポートにまとめます。</p>
             <StoreNameInput value={storeName} onChange={setStoreName} onSelectStore={(store) => {
               setStoreUrl(store.url);
-              setSiteUrls((urls) => ({ ...urls, tabelog: store.tabelogUrl }));
+              setSiteUrls((urls) => ({ ...urls, tabelog: store.tabelogUrl, google_maps: store.googleMapsUrl }));
             }} />
             <label>店舗の公式サイト・基準URL<input required type="url" value={storeUrl} onChange={(e) => setStoreUrl(e.target.value)} placeholder="https://..." /></label>
             <label>グループ名 <span className="optional">任意</span><input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="系列店も比較します" /></label>
