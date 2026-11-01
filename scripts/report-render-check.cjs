@@ -74,15 +74,121 @@ assert(modernHtml.includes('専門調査の商品記録（未照合を含む）'
 assert(modernHtml.includes('現行価格・提供可否を保証するものではありません'));
 assert(modernHtml.includes('2名以上・事前予約'));
 assert(!modernHtml.includes('次の解析から適用されます'));
+// Reviewed inventory must never promote raw media attribution or unresolved products.
+const reviewed={...modern,productInventory:[
+  {...modern.productInventory[0],name:'訂正後コース',site:'予約媒体A',reviewStatus:'corrected',reviewReason:'原記録の媒体名を訂正'},
+  {...modern.productInventory[0],id:'C2',name:'照合済みコース',reviewStatus:'confirmed',reviewReason:'掲載条件と一致'},
+  {...modern.productInventory[0],id:'C3',name:'未確認コース',reviewStatus:'unverified',reviewReason:'提供条件を確認できず'},
+  {...modern.productInventory[0],id:'C4',name:'棄却コース',reviewStatus:'rejected',reviewReason:'対象店舗の商品ではない'},
+  {...modern.productInventory[0],id:'C5',name:'状態欠落コース'},
+  {...modern.productInventory[0],id:'C6',name:'未知状態コース',reviewStatus:'future'}
+],originalProductInventory:[{...modern.productInventory[0],name:'原記録だけのコース',site:'誤分類された媒体'}]};
+const reviewedHtml=render(IntegratedReport,{text:JSON.stringify(reviewed)});
+assert(reviewedHtml.includes('照合後の商品情報'),'reviewed inventory has an explicit reviewed heading');
+const reviewedTable=reviewedHtml.match(/<table[^>]*><caption>照合後の商品情報<\/caption>[\s\S]*?<\/table>/)?.[0] || '';
+assert(reviewedTable.includes('訂正後コース')&&reviewedTable.includes('予約媒体A'));
+assert(reviewedTable.includes('照合済みコース'));
+assert.equal((reviewedTable.match(/<th scope="col"/g)||[]).length,5,'reviewed inventory must fit the existing five-column product layout');
+for(const name of ['未確認コース','棄却コース','状態欠落コース','未知状態コース','原記録だけのコース','誤分類された媒体']) assert(!reviewedTable.includes(name),name);
+for(const reason of ['原記録の媒体名を訂正','掲載条件と一致','提供条件を確認できず','対象店舗の商品ではない']) assert(reviewedHtml.includes(reason),reason);
+assert(reviewedHtml.includes('未確認・採用しなかった商品情報'));
+const originalDetails=reviewedHtml.match(/<details class="sources-block"><summary>専門調査の商品原記録[\s\S]*?<\/details>/)?.[0] || '';
+assert(originalDetails.includes('原記録だけのコース')&&originalDetails.includes('誤分類された媒体'),'raw inventory remains in a separate collapsed disclosure');
+assert(!reviewedHtml.replace(originalDetails,'').includes('誤分類された媒体'));
+// Research gaps and store verification are not store improvement priorities.
+const scopes=['research','verification','store','future','store','store','store'];
+const scoped={...reviewed,keyFindings:scopes.map((scope,i)=>({...modern.keyFindings[0],id:`SF${i}`,title:`区分課題${i}`,scope})),actionPlan:scopes.map((scope,i)=>({...modern.actionPlan[0],action:`区分施策${i}`,scope,priority:i<2?'P0':'P1',findingIds:[`SF${i}`]}))};
+const scopedHtml=render(IntegratedReport,{text:JSON.stringify(scoped)});
+const scopedOverview=scopedHtml.match(/class="report-priorities">[\s\S]*?<ol>([\s\S]*?)<\/ol>/)?.[1] || '';
+assert.deepEqual([...scopedOverview.matchAll(/href="#report-action-(\d+)"/g)].map(match=>Number(match[1])),[2,4,5],'top three contains store actions only');
+for(const text of ['調査側の追加確認','店舗への確認事項','未分類の確認事項']) assert(scopedHtml.includes(text),text);
+for(const [i,scope] of scopes.entries()) {
+  const group=scope==='future'?'unclassified':scope;
+  for(const kind of ['finding','action']) {
+    const start=scopedHtml.indexOf(`id="report-${kind}s-${group}"`);
+    const item=scopedHtml.indexOf(`id="report-${kind}-${i}"`);
+    const next=scopedHtml.indexOf(`id="report-${kind}s-`,start+1);
+    assert(start>=0&&item>start&&(next<0||item<next),`${kind} ${i} in ${group}`);
+    assert.equal((scopedHtml.match(new RegExp(`id="report-${kind}-${i}"`,'g'))||[]).length,1);
+  }
+  assert(scopedHtml.includes(`href="#report-finding-${i}"`),`related finding ${i}`);
+}
+const noStore={...scoped,keyFindings:scoped.keyFindings.filter(item=>item.scope!=='store'),actionPlan:scoped.actionPlan.filter(item=>item.scope!=='store')};
+assert(!render(IntegratedReport,{text:JSON.stringify(noStore)}).includes('class="report-priorities"'),'no empty store top-three block');
+for(const scope of ['',null,42]) assert(!render(IntegratedReport,{text:JSON.stringify({...fixture,actionPlan:[{action:'未知の区分',scope}]})}).includes('class="report-priorities"'),'unknown scopes never promoted');
+// Render the actual agents-tab JSX from App, without mounting auth or any API client.
+const appSource=fs.readFileSync(root+'/src/App.tsx','utf8');
+const appAst=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.ES2022,true,ts.ScriptKind.TSX);
+let agentsBranch;
+let stageDeclaration;
+let titleDeclaration;
+const visit=node=>{
+  if(ts.isBinaryExpression(node)&&node.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken&&/^tab\s*===\s*"agents"$/.test(node.left.getText(appAst))) agentsBranch=node.right.getText(appAst);
+  if(ts.isVariableDeclaration(node)&&node.name.getText(appAst)==='RUN_STAGES') stageDeclaration=`const ${node.getText(appAst)};`;
+  if(ts.isFunctionDeclaration(node)&&node.name?.text==='agentTitle') titleDeclaration=node.getText(appAst);
+  ts.forEachChild(node,visit);
+};
+visit(appAst);
+assert(agentsBranch&&stageDeclaration&&titleDeclaration,'actual agents-tab branch is present');
+const agentModule=new (require('module').Module)(root+'/src/AgentsTab.check.cjs');
+agentModule.filename=root+'/src/AgentsTab.check.cjs';
+agentModule.paths=moduleObject.paths;
+agentModule.require=id=>id==='./ReportView'?moduleObject.exports:req(id);
+const reportViewImport=appAst.statements.find(node=>ts.isImportDeclaration(node)&&node.moduleSpecifier.text==='./ReportView').getText(appAst);
+agentModule._compile(ts.transpileModule(`${reportViewImport}\n${stageDeclaration}\n${titleDeclaration}\nexport function AgentsTab({selected}: any) { return ${agentsBranch}; }`,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,agentModule.filename);
+const claimReviews=['supported','conditional','unverified','rejected','future'].map((decision,i)=>({agentId:'gourmet',claim:`検証対象の主張${i}`,decision,reason:`統合判断の理由${i}`,sources:[`https://example.com/review/${i}`,'javascript:alert(1)']}));
+claimReviews.push({agentId:'market',claim:'別担当だけの主張',decision:'rejected',reason:'別担当だけの理由',sources:[]});
+const reviewedClaims={...scoped,claimReviews};
+const syntheticAgent={id:'gourmet',provider:'Synthetic provider',status:'done',text:'原文を省略せず残す。\n\n原文の後半も残す。',sources:['https://example.com/raw']};
+const renderAgents=report=>render(agentModule.exports.AgentsTab,{selected:{report:JSON.stringify(report),agents:[syntheticAgent]}});
+const agentsHtml=renderAgents(reviewedClaims);
+assert(agentsHtml.includes('専門AIの原調査（未検証の主張を含む）'),'agent originals must be labeled unverified');
+assert(agentsHtml.includes('API応答取得≠全主張検証'));
+for(const label of ['統合時に採用','条件付きで採用','未確認','採用せず','原資料との意味の一致を保証するものではありません']) assert(agentsHtml.includes(label),label);
+for(const [i] of claimReviews.slice(0,5).entries()) {
+  assert(agentsHtml.includes(`検証対象の主張${i}`)&&agentsHtml.includes(`統合判断の理由${i}`));
+  assert(agentsHtml.includes(`href="https://example.com/review/${i}"`));
+  assert(agentsHtml.indexOf(`統合判断の理由${i}`)<agentsHtml.indexOf('原文を省略せず残す。'),'reviews precede original');
+}
+assert(!agentsHtml.includes('別担当だけの主張')&&!agentsHtml.includes('別担当だけの理由'));
+assert(!agentsHtml.includes('href="javascript:'));
+assert(agentsHtml.includes('原文の後半も残す。'));
+const legacyAgentHtml=renderAgents(fixture);
+assert(legacyAgentHtml.includes('API応答取得≠全主張検証'));
+assert(legacyAgentHtml.includes('この担当の主張別の採否記録はありません'));
+assert(!legacyAgentHtml.includes('採用せず'),'no inferred rejection for old reports');
+assert(renderAgents({...fixture,claimReviews:[]}).includes('この担当の主張別の採否記録はありません'));
+const errorAgentHtml=render(agentModule.exports.AgentsTab,{selected:{report:JSON.stringify(reviewedClaims),agents:[{...syntheticAgent,status:'partial',error:'取得時の制約'}]}});
+assert(errorAgentHtml.includes('取得時の制約')&&errorAgentHtml.includes('原文の後半も残す。'),'partial/error does not discard original text');
 const newFormat=typeof report.qualityGate?.version === 'number' && report.qualityGate.version >= 2;
 assert.equal(actual.includes('次の解析から適用されます'),!newFormat);
 assert(render(IntegratedReport,{text:JSON.stringify(fixture)}).includes('次の解析から適用されます'));
 assert(render(IntegratedReport,{text:'【結論】\n旧形式の本文'}).includes('旧形式の本文'));
+// Guard empty/fallback inventory placements and original-record preservation.
+for(const detailSections of [[],[{title:'参考情報',body:'商品章がない表示例'}]]) {
+  const html=render(IntegratedReport,{text:JSON.stringify({...reviewed,detailSections,detailedReport:''})});
+  assert.equal((html.match(/<caption>照合後の商品情報<\/caption>/g)||[]).length,1);
+  assert(html.includes('原記録だけのコース'));
+}
+const rawOnlyHtml=render(IntegratedReport,{text:JSON.stringify({...reviewed,productInventory:[]})});
+assert(rawOnlyHtml.includes('照合して採用できた商品情報はありません。'));
+assert(rawOnlyHtml.includes('原記録だけのコース'));
+assert.equal((reviewedTable.match(/<tr>/g)||[]).length-1,2,'adopted inventory row count');
+assert.equal((originalDetails.match(/<tbody>[\s\S]*?<\/tbody>/)?.[0].match(/<tr>/g)||[]).length,reviewed.originalProductInventory.length,'all original rows retained');
+for(const html of [actual,modernHtml,reviewedHtml,scopedHtml]) {
+  const ids=[...html.matchAll(/\sid="([^"]+)"/g)].map(match=>match[1]);
+  assert.equal(new Set(ids).size,ids.length,'anchors are unique');
+  for(const [,id] of html.matchAll(/href="#([^"]+)"/g)) assert(ids.includes(id),`anchor ${id} resolves`);
+}
 const htmlFlag=process.argv.indexOf('--html-dir');
 if(htmlFlag>=0){
 const htmlDir=path.resolve(process.argv[htmlFlag+1]);fs.mkdirSync(htmlDir,{recursive:true});
-const css=fs.readFileSync(root+'/src/style.css','utf8');
+// Offline previews use installed system fonts; never fetch external font stylesheets.
+const css=fs.readFileSync(root+'/src/style.css','utf8').replace(/@import\s+[^;]+;/g,'');
 fs.writeFileSync(path.join(htmlDir,'restaurant-report-review.html'),'<!doctype html><html lang="ja"><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>実レポート表示検証</title><style>'+css+'</style><body><main style="max-width:1160px;margin:0 auto;padding:16px"><h1>保存レポートの表示確認</h1><article class="panel report-panel">'+actual+'</article></main></body></html>');
 fs.writeFileSync(path.join(htmlDir,'restaurant-report-modern-review.html'),'<!doctype html><html lang="ja"><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>新形式表示検証用</title><style>'+css+'</style><body><main style="max-width:1160px;margin:0 auto;padding:16px"><h1>表示テスト用データ</h1><article class="panel report-panel">'+modernHtml+'</article></main></body></html>');
+for(const [name,html] of [['restaurant-report-reviewed',scopedHtml],['restaurant-agents-reviewed',agentsHtml]]) {
+  fs.writeFileSync(path.join(htmlDir,`${name}.html`),'<!doctype html><html lang="ja"><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src data:"><title>合成データの表示検証</title><style>'+css+'</style><body><main style="max-width:1160px;margin:0 auto;padding:16px"><h1>見本データ（本番の情報ではありません）</h1><article class="panel report-panel">'+html+'</article></main></body></html>');
 }
-console.log(`PASS: ${report.keyFindings.length} findings, ${report.actionPlan.length} actions, ${report.detailSections.length} chapters, ${report.productInventory?.length || 0} inventory rows; version-aware legacy notice; table/list/URL safety and evidence/action/coverage fields.`);
+}
+console.log(`PASS: ${report.keyFindings.length} legacy findings, ${report.actionPlan.length} legacy actions, ${report.detailSections.length} legacy chapters; reviewed inventory separation and reasons; scoped priorities/anchors; actual App agents branch with claim decisions, original text, old-report and partial-error coverage; table/list/URL safety.`);

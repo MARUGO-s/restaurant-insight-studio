@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { withIntegrityReviews } from "./report_integrity_fixture.ts";
 import { parseIntegratedReport, validateReportQuality, parseMenuInventory, sourceUrls, reportSourceUrls, buildSynthesisPrompt, synthesize } from "../functions/restaurant-analysis/core.ts";
 import { evidenceUrl, qualityInput, qualityReport } from "./report_quality_fixture.ts";
 const gate = (report: any, input: any = qualityInput) => validateReportQuality(report, input, [evidenceUrl]);
@@ -51,12 +52,13 @@ Deno.test("saved report holds server inventory, excludes unused candidate URLs, 
   const report = qualityReport();
   (report as any).productInventory = [{ name: "model omitted expensive courses" }];
   const menuInventory = [{ id: "M1", name: "貸切", price: "8000円", conditions: "20〜60人", source: evidenceUrl, site: "食べログ" }];
-  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output_text: JSON.stringify({ critique: "反証・採否を確認", report }), usage: { input_tokens: 1, output_tokens: 1 } } })}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+  globalThis.fetch = async () => new Response(`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", output_text: JSON.stringify({ critique: "反証・採否を確認", report: withIntegrityReviews(report, [{ id: "market", text: "市場" }, { id: "gourmet", text: "取得ノート", menuInventory }, { id: "social", text: "X調査" }]) }), usage: { input_tokens: 1, output_tokens: 1 } } })}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
   const db = { from: () => ({ insert: async () => ({ error: null }), update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }) }) };
   try {
     const result = await synthesize(qualityInput, [{ id: "market", provider: "OpenAI", status: "done", text: "市場", sources: [] }, { id: "gourmet", provider: "Google Gemini", status: "done", text: "取得ノート", sources: [evidenceUrl, "https://x.com/unrelated/status/1"], menuInventory }, { id: "social", provider: "xAI Grok", status: "done", text: "X調査", sources: [] }], { costDb: db, userId: "owner", operation: "fact_check_synthesis" });
     const saved = JSON.parse(result.report_row.report);
-    assert.deepEqual(saved.productInventory, menuInventory); assert.equal(saved.qualityGate.version, 2);
+    assert.deepEqual(saved.originalProductInventory, menuInventory);
+    assert.deepEqual(saved.productInventory, menuInventory.map(m => ({ ...m, reviewStatus: "confirmed", reviewReason: "掲載値を採用。意味一致の保証ではない。" }))); assert.equal(saved.qualityGate.version, 3);
     assert.deepEqual(result.report_row.report_sources, [evidenceUrl]);
   } finally { globalThis.fetch = oldFetch; }
 });

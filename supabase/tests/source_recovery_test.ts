@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { withIntegrityReviews } from "./report_integrity_fixture.ts";
 import { finalizeSynthesis, savedSynthesis, synthesize, executeJob, NonBillableSynthesisError, validateReportQuality, sourceUrls } from "../functions/restaurant-analysis/core.ts";
 import { qualityReport, evidenceUrl } from "./report_quality_fixture.ts";
 const parent = "https://tabelog.com/tokyo/A1304/A130401/13019866/";
@@ -70,6 +71,27 @@ Deno.test("unread coverage detail is removed only with an observed selected pare
   assert.equal(sourceUrls("", result.report_row.report_sources).includes(unread), false);
   assert.match(result.sourceRecovery.originalSha256, /^[a-f0-9]{64}$/);
 });
+Deno.test("v3 coverage recovery ignores model-owned raw inventory and preserves the completed original", async () => {
+  await noNetwork(async () => {
+    const original = withIntegrityReviews(report(), agents());
+    const value = { ...original, originalProductInventory: [{ source: "https://invented.test/raw" }] };
+    const completed = { ...draft(value), requiredReportVersion: 3 as const };
+    const result = await finalizeSynthesis(input, agents(), completed);
+    const recovered = JSON.parse(result.report_row.report), expected = structuredClone(original);
+    expected.researchCoverage.find((r: any) => r.targetId === "tabelog").sources = [parent];
+    assert.deepEqual(recovered.originalProductInventory, []);
+    assert.deepEqual(recovered.productInventory, []);
+    assert.equal(recovered.qualityGate.version, 3);
+    delete recovered.originalProductInventory; delete recovered.productInventory; delete recovered.qualityGate;
+    assert.deepEqual(recovered, expected);
+    assert.deepEqual(result.synthesisDraft, completed);
+    assert.equal(completed.text, draft(value).text);
+    assert.equal(result.sourceRecovery.status, "recovered");
+    assert.equal(result.sourceRecovery.additionalGenerations, 0);
+    assert.deepEqual(result.sourceRecovery.corrections.map(c => c.removedUrl), [unread]);
+    assert.equal(result.report_row.report_sources.includes("https://invented.test/raw"), false);
+  });
+});
 Deno.test("unknown evidence in claims, body, tables or critique blocks recovery rather than deleting content", async () => {
   const patches = [
     (r: any) => { r.keyFindings[0].sources.push(unread); },
@@ -121,6 +143,63 @@ Deno.test("completed durable response is recovered and saved with zero provider 
     for (const k of ["user_id", "run_id", "job_id", "operation", "request_metadata->>response_status"]) assert.ok(d.filters.some(f => f.k === k));
   });
 });
+Deno.test("v2 and v3 completed draft and terminal checkpoints recover without provider calls or cost writes", async () => {
+  await noNetwork(async () => {
+    for (const version of [2, 3]) {
+      const value = version === 3
+        ? { ...withIntegrityReviews(report(), agents()), originalProductInventory: [{ source: "https://invented.test/raw" }] }
+        : report();
+      const completed = { ...draft(value), ...(version === 3 ? { requiredReportVersion: 3 as const } : {}) };
+      const terminal = version === 3 ? { ...completed, provider: "OpenAI" }
+        : { provider: "OpenAI", text: completed.text, responseId: completed.responseId, toolSources: [parent], sources: [unread], partial: true };
+      for (const output of [{ synthesisDraft: completed }, terminal]) {
+        const d = database();
+        await executeJob(d.db, job(output), run);
+        const finish = d.rpcCalls.find(c => c.name === "restaurant_insight_finish_job").args;
+        assert.equal(finish.p_error, null);
+        assert.equal(d.saved.synthesisComplete, true);
+        assert.equal(d.saved.sourceRecovery.status, "recovered");
+        assert.equal(d.saved.sourceRecovery.additionalGenerations, 0);
+        assert.equal(d.saved.synthesisDraft.text, completed.text);
+        const savedReport = JSON.parse(d.saved.report_row.report);
+        assert.equal(savedReport.qualityGate.version, version);
+        assert.deepEqual(savedReport.researchCoverage.find((r: any) => r.targetId === "tabelog").sources, [parent]);
+        if (version === 3) assert.deepEqual(savedReport.originalProductInventory, []);
+        else assert.equal(Object.hasOwn(savedReport, "originalProductInventory"), false);
+        assert.equal(d.writes.length, 0);
+      }
+    }
+  });
+});
+Deno.test("raw inventory exclusion never authorizes unknown claim URLs or nested fields; refused drafts remain intact", async () => {
+  await noNetwork(async () => {
+    for (const version of [2, 3]) {
+      for (const patch of [
+        (r: any) => { r.keyFindings[0].evidence += " https://unobserved.test/claim"; },
+        (r: any) => { r.detailSections[0].originalProductInventory = [{ source: "https://unobserved.test/nested" }]; },
+        (r: any) => {
+          if (version === 3) r.claimReviews[0].reason += " https://unobserved.test/review";
+          else r.detailSections[0].body += " https://unobserved.test/body";
+        },
+      ]) {
+        const value = version === 3 ? withIntegrityReviews(report(), agents()) : report();
+        value.originalProductInventory = [{ source: "https://invented.test/raw" }];
+        patch(value);
+        const completed = { ...draft(value), ...(version === 3 ? { requiredReportVersion: 3 as const } : {}) };
+        const d = database();
+        await executeJob(d.db, job({ synthesisDraft: completed }), run);
+        const finish = d.rpcCalls.find(c => c.name === "restaurant_insight_finish_job").args;
+        assert.equal(finish.p_retryable, false);
+        assert.match(finish.p_error, /追跡できない/);
+        assert.equal(d.saved.sourceRecovery.status, "needs_review");
+        assert.equal(d.saved.sourceRecovery.additionalGenerations, 0);
+        assert.equal(d.saved.synthesisDraft.text, completed.text);
+        assert.equal(d.saved.report_row, undefined);
+        assert.equal(d.writes.length, 0);
+      }
+    }
+  });
+});
 Deno.test("unsafe completed draft is retained for review; automatic and explicit retry never generate again", async () => {
   await noNetwork(async () => {
     const r = report(); r.keyFindings[0].sources.push("https://unobserved.test/claim");
@@ -166,16 +245,18 @@ Deno.test("finish failure resumes the validated completed draft without another 
 });
 Deno.test("new synthesis journals its completed original before validating and repairs in the same single generation", async () => {
   const d = database([]), checkpoints: any[] = [], oldFetch = globalThis.fetch;
+  const freshText = draft(withIntegrityReviews(report(), agents())).text;
   let calls = 0;
   globalThis.fetch = async () => { calls++; return new Response(`data: ${JSON.stringify({ type: "response.completed", response: {
-    id: "resp-new", status: "completed", model: "gpt-6.1-terra", output_text: draft().text,
+    id: "resp-new", status: "completed", model: "gpt-6.1-terra", output_text: freshText,
     usage: { input_tokens: 10, output_tokens: 20 },
   } })}\n\n`, { headers: { "Content-Type": "text/event-stream" } }); };
   try {
     const result = await synthesize(input, agents(), { ...meter(d.db), checkpoint: async value => { checkpoints.push(value); } });
     assert.equal(calls, 1); assert.equal(result.sourceRecovery.status, "recovered");
     const beforeValidation = checkpoints.find(c => c.synthesisDraft && !c.report_row);
-    assert.equal(beforeValidation.synthesisDraft.text, draft().text);
+    assert.equal(beforeValidation.synthesisDraft.text, freshText);
+    assert.equal(beforeValidation.synthesisDraft.requiredReportVersion, 3);
     assert.equal(checkpoints.at(-1).synthesisComplete, true);
     assert.equal(d.writes.filter(w => w.id).length, 1);
     assert.ok(checkpoints.some(c => c.responseStatus === "completed" && c.costId));

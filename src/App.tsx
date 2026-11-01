@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { costExplanation } from "./lib/costs";
+import { StoreNameInput, officialStoreUrl, STORE_CATALOG } from "./StoreNameInput";
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
 import { invoke } from "./lib/api";
-import { IntegratedReport, TextPanel, SourceLinks } from "./ReportView";
+import { IntegratedReport, TextPanel, SourceLinks, SpecialistResearch } from "./ReportView";
 import { TrashPage, TrashIcon, DeleteReportDialog, reportDate } from "./ReportTrash";
 import type { TrashItem } from "./ReportTrash";
 import { GeminiConnectionCheck, ProviderErrorDetails } from "./ProviderDiagnostics";
@@ -222,11 +223,11 @@ export default function App() {
   const [signingIn, setSigningIn] = useState(false);
   const [health, setHealth] = useState<Health>({ openai: false, gemini: false, xai: false });
   const [storeName, setStoreName] = useState("マルゴ四谷");
-  const [storeUrl, setStoreUrl] = useState("https://marugo-waltz.com");
+  const [storeUrl, setStoreUrl] = useState(() => officialStoreUrl("マルゴ四谷"));
   const [groupName, setGroupName] = useState("マルゴグループ");
   const [researchFocus, setResearchFocus] = useState("");
   const [selectedSiteIds, setSelectedSiteIds] = useState<string[]>(["tabelog"]);
-  const [siteUrls, setSiteUrls] = useState<Record<string, string>>({});
+  const [siteUrls, setSiteUrls] = useState<Record<string, string>>(() => ({ tabelog: STORE_CATALOG.find(store => store.url === officialStoreUrl("マルゴ四谷"))?.tabelogUrl ?? "" }));
   const [customSites, setCustomSites] = useState<{ id: string; name: string; url: string }[]>([]);
   const [question, setQuestion] = useState("");
   const [tab, setTab] = useState<Tab>("report");
@@ -532,7 +533,10 @@ export default function App() {
           <form className="panel form-panel" onSubmit={startAnalysis}>
             <div className="panel-kicker">新しいリサーチ</div><h2>調べたいお店を指定</h2>
             <p className="muted form-intro">専門分野の異なる3つのAIが調査し、根拠を確認してひとつの改善レポートにまとめます。</p>
-            <label>店舗名<input required value={storeName} onChange={(e) => setStoreName(e.target.value)} placeholder="例：マルゴ四谷" /></label>
+            <StoreNameInput value={storeName} onChange={setStoreName} onSelectStore={(store) => {
+              setStoreUrl(store.url);
+              setSiteUrls((urls) => ({ ...urls, tabelog: store.tabelogUrl }));
+            }} />
             <label>店舗の公式サイト・基準URL<input required type="url" value={storeUrl} onChange={(e) => setStoreUrl(e.target.value)} placeholder="https://..." /></label>
             <label>グループ名 <span className="optional">任意</span><input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="系列店も比較します" /></label>
             <div className="research-focus-field">
@@ -580,7 +584,7 @@ export default function App() {
             {selected.agents.some((agent) => agent.status !== "done") && <div className="coverage-notice"><b>取得範囲が限られた調査があります</b><p>{selected.agents.filter((agent) => agent.status !== "done").map((agent) => agentTitle(agent.id)).join("・")}の専門調査は一部取得または取得失敗となりました。詳細な取得状況は「専門AIの調査」に表示します。このレポートの判断は、確認できた情報の範囲に限られます。</p></div>}
             <nav className="tabs">{([["report","統合レポート"],["agents","専門AIの調査"],["critique","反証・確認事項"]] as [Tab,string][]).map(([id,label]) => <button key={id} onClick={() => setTab(id)} className={tab === id ? "current" : ""}>{label}</button>)}</nav>
             {tab === "report" && <article className="panel report-panel"><IntegratedReport text={selected.report}/><details className="sources-block"><summary>統合レポートの参照URLを見る</summary><p className="muted small">各主張の根拠と確認範囲は本文に記載しています。URLがあるだけで、ページ全文の取得や事実の正しさを保証するものではありません。</p><SourceLinks sources={selected.reportSources}/></details></article>}
-            {tab === "agents" && <div className="agent-stack">{selected.agents.map((agent) => <article className="panel agent-panel" key={agent.id}><header><div className={`role-icon ${agent.id === "market" ? "market" : agent.id === "gourmet" ? "gourmet" : "social"}`}>{agent.id.startsWith("social") ? "X" : agent.id[0].toUpperCase()}</div><div><b>{agentTitle(agent.id)}</b><small>{agent.provider}</small></div><span className={`agent-state ${agent.status}`}>{agent.status === "done" ? "応答取得済み" : agent.status === "partial" ? "一部取得" : "取得失敗"}</span></header>{agent.error ? <p className="agent-error">{agent.error}</p> : <TextPanel text={agent.text}/>}<details className="sources-block"><summary>担当AIが検索・参照したURL</summary><p className="muted small">検索候補や閲覧できなかったページも含まれます。採用した根拠は調査本文を確認してください。</p><SourceLinks sources={agent.sources}/></details></article>)}</div>}
+            {tab === "agents" && <div className="agent-stack">{selected.agents.map((agent) => <article className="panel agent-panel" key={agent.id}><header><div className={`role-icon ${agent.id === "market" ? "market" : agent.id === "gourmet" ? "gourmet" : "social"}`}>{agent.id.startsWith("social") ? "X" : agent.id[0].toUpperCase()}</div><div><b>{agentTitle(agent.id)}</b><small>{agent.provider}</small></div><span className={`agent-state ${agent.status}`}>{agent.status === "done" ? "応答取得済み" : agent.status === "partial" ? "一部取得" : "取得失敗"}</span></header><SpecialistResearch text={agent.text} agentId={agent.id} reportText={selected.report} error={agent.error}/><details className="sources-block"><summary>担当AIが検索・参照したURL</summary><p className="muted small">検索候補や閲覧できなかったページも含まれます。採用した根拠は調査本文を確認してください。</p><SourceLinks sources={agent.sources}/></details></article>)}</div>}
             {tab === "critique" && <article className="panel report-panel"><div className="panel-kicker">FACT CHECK</div><h3>統合担当による反証・根拠の照合</h3><p className="muted small">専門AIの調査を照合し、採用・修正・保留した判断と理由を示します。同じ資料の転載や同じモデルによる再確認は、独立した証拠として数えません。</p><TextPanel text={selected.critique}/><div className="sources-block"><b>検証時の参照URL</b><SourceLinks sources={selected.critiqueSources}/></div></article>}
             <section className="panel qa-panel"><div className="qa-heading"><div><span className="panel-kicker">REPORT FOLLOW-UP</span><h3>レポートに質問する</h3></div><span>この調査結果を引き継いで回答</span></div>
               <div className="conversation">{selected.followups.map((item,index) => <div className="qa-pair" key={`${item.at}-${index}`}><div className="question-bubble">{item.question}</div><div className="answer-bubble"><TextPanel text={item.answer}/><SourceLinks sources={item.sources}/></div></div>)}</div>

@@ -8,12 +8,12 @@ export function recoverUnreadCoverageLinks(
   const known = new Set(availableSources.map(canonical));
   const candidate = structuredClone(report);
   if (!Array.isArray(candidate.researchCoverage)) return null;
-  // Unknown URLs used anywhere in prose, findings, tables or critique are not
-  // eligible. Exclude only the coverage source arrays from this inspection.
+  // Ignore server-owned metadata as in reportSourceUrls; finalization supplies it.
+  // Unknown URLs in claims remain ineligible, except coverage source arrays.
   const outsideCoverageSources: string[] = [critique];
   const walk = (value: any, path: string[] = []) => {
     if (path.length === 3 && path[0] === "researchCoverage" && path[2] === "sources") return;
-    if (path.length === 1 && ["qualityGate", "productInventory", "researchFocus"].includes(path[0])) return;
+    if (path.length === 1 && ["qualityGate", "productInventory", "originalProductInventory", "researchFocus"].includes(path[0])) return;
     if (typeof value === "string") outsideCoverageSources.push(value);
     else if (Array.isArray(value)) value.forEach((child, index) => walk(child, [...path, String(index)]));
     else if (value && typeof value === "object") Object.entries(value).forEach(([key, child]) => walk(child, [...path, key]));

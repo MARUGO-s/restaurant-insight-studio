@@ -16,6 +16,20 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
 .report-header-actions{display:flex;flex-direction:column;align-items:flex-end;gap:12px;flex:0 0 auto}.report-header-actions button{border:1px solid #e0e6dc;background:#fff;border-radius:6px;padding:8px 12px;color:#52664c;font-size:11px}.partial-badge{background:#f7f1e6;color:#937746}.partial-badge i{background:#b39966}.coverage-notice{padding:16px 20px;border:1px solid #ece1c6;border-radius:8px;background:#fcfaf3;font-size:12px;color:#7e704f}.coverage-notice p{margin:7px 0 0;line-height:1.8}@media(max-width:600px){.report-header-actions{flex-direction:row;align-items:center;flex-wrap:wrap}.report-header-actions button{font-size:11px}}@media print{.report-header-actions button{display:none}.sources-block>.source-list{display:flex!important}}
 .agent-state.partial{color:#997d48}
 
+/* Editable store suggestions: existing input state and submission stay intact. */
+.store-name-field{position:relative;margin-bottom:13px;min-width:0}
+.form-panel .store-name-field>label{margin-bottom:6px}
+.store-name-control{position:relative}
+.form-panel .store-name-control input{margin-top:0;padding-right:44px}
+.store-name-toggle{position:absolute;right:1px;top:1px;bottom:1px;width:38px;border:0;border-left:1px solid var(--line);border-radius:0 5px 5px 0;background:var(--green-soft);color:var(--green);font-size:16px}
+.store-name-toggle:focus-visible{outline:2px solid #768c78;outline-offset:2px}
+.store-name-options{position:absolute;z-index:20;top:calc(100% + 4px);left:0;right:0;max-height:240px;overflow-y:auto;overscroll-behavior:contain;list-style:none;padding:4px;margin:0;border:1px solid #d3ded2;border-radius:6px;background:var(--paper);box-shadow:0 6px 20px #20241f18}
+.store-name-options li{padding:11px 10px;min-height:40px;font-size:12px;line-height:1.5;overflow-wrap:anywhere;color:var(--ink);cursor:pointer;border-radius:4px}
+.store-name-options li[aria-selected=true],.store-name-options li[role=option]:hover{background:var(--green-soft);color:var(--green)}
+.store-name-options .store-name-empty{color:var(--muted);cursor:default}
+.store-name-hint{display:block;color:var(--muted);font-size:10px;line-height:1.6;margin-top:6px}
+
+
 /* Persisted research progress remains readable alongside the full report. */
 .durable-progress{padding:24px;min-width:0}
 .durable-progress>header{display:flex;justify-content:space-between;align-items:center;gap:18px}

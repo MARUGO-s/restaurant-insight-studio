@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { withIntegrityReviews } from "./report_integrity_fixture.ts";
 import { normalizeResearchFocus, buildResearchPrompts, buildSynthesisPrompt, reportWithResearchFocus, dbReport, queueAnalysis, synthesize, answerQuestion } from "../functions/restaurant-analysis/core.ts";
 
 import { qualityReport, evidenceUrl } from "./report_quality_fixture.ts";
@@ -79,7 +80,7 @@ Deno.test("synthesis request and saved report use user's focus even if model rew
   let payload: any;
   globalThis.fetch = async (_url, options) => {
     payload = JSON.parse(String(options?.body));
-    const response = { type: "response.completed", response: { status: "completed", output_text: JSON.stringify({ critique: "反証を確認", report: generatedReport }), usage: { input_tokens: 1, output_tokens: 1 } } };
+    const response = { type: "response.completed", response: { status: "completed", output_text: JSON.stringify({ critique: "反証を確認", report: withIntegrityReviews(generatedReport, [{ id: "market", text: "市場" }, { id: "gourmet", text: "調査メモ" }, { id: "social", text: "X調査" }]) }), usage: { input_tokens: 1, output_tokens: 1 } } };
     return new Response(`data: ${JSON.stringify(response)}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
   };
   try {
