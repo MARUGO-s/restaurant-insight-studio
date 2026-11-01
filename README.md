@@ -35,6 +35,8 @@ IDとパスワードでログインします（Supabase Authの`signInWithPasswo
 
 ## Deployment checklist
 
+統合復旧も公開済み：太字・斜体省略の限定復旧、項目別診断、元応答を保管する `restaurant_insight_synthesis_regenerations`、4専門調査を残す明示承認付き統合1回を追加。通常の保存応答再確認と有料再生成は別操作で、応答不明を理由に自動で追加購入しません。[仕様](docs/claim-quotation-recovery.md)・[公開と実行結果](docs/release-synthesis-recovery-2026-11-01.md)を参照。新migration→worker→API→UIの順に公開し、新世代実行中は旧workerへ戻しません。
+
 1. `supabase/migrations/`の未適用分を確認し、このアプリのmigrationだけを`gourmet`へ適用します。共有DBへの一括db pushは使いません。永続ジョブmigrationはpg_cron / pg_netを有効化し、専用dispatcherを毎分実行します。
 2. `restaurant-analysis`を`verify_jwt = true`、`restaurant-analysis-worker`を`verify_jwt = false`で配置します。両方に依存ファイル`restaurant-analysis/core.ts`を含めます。workerはDBが発行する256bit・120秒有効・1回限りのジョブ別トークンをservice専用RPCで照合します。匿名リクエストだけでは処理を開始できません。既存のユーザーAPIのJWT認証は維持します。
 3. Supabase Dashboard → Edge Functions → Secretsに3社のAPIキーを設定します。`.env.local`にはSupabaseの公開キーだけを置き、AI APIキーは置きません。
