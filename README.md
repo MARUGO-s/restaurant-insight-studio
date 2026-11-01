@@ -29,6 +29,8 @@ IDとパスワードでログインします（Supabase Authの`signInWithPasswo
 
 レポート・料金・ゴミ箱はSupabaseのユーザーIDごとに分離されるため、以前のメールリンク用アカウントで作ったレポートは新しいIDアカウントには表示されません。
 
+2026-11-01公開：23店舗の選択・自由入力と公式サイト／食べログURL連動、レポート品質v3を反映済み。検証・配布証跡・制限は[公開記録](docs/release-2026-11-01.md)を参照。
+
 ## Deployment checklist
 
 1. `supabase/migrations/`の未適用分を確認し、このアプリのmigrationだけを`gourmet`へ適用します。共有DBへの一括db pushは使いません。永続ジョブmigrationはpg_cron / pg_netを有効化し、専用dispatcherを毎分実行します。
