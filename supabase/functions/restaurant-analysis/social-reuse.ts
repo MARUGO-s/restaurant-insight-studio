@@ -76,6 +76,10 @@ export function reuseInfo(plan: ResearchPlan, sources: string[], audit?: DeltaAu
       baselineAt: plan.baseline.output.reuse?.updatedAt ?? plan.baseline.startedAt } : {}),
     retainedSources: retained.length, addedSources: sources.filter(s => !known.has(evidenceKey(s))).length, ...(audit ? { audit } : {}), ...(fallbackReason ? { fallbackReason } : {}) };
 }
+export function updateSummary(info: ReuseInfo, scope: string): string {
+  const date = (value: string) => value.slice(0, 10);
+  return `${scope}: ${info.mode === "incremental" ? `前回（${date(info.baselineAt ?? info.fullResearchAt)}）の調査ノートと出典を保持し、未確認事項・新着・反例を追加調査` : "全範囲を調査"}。今回確認: ${date(info.updatedAt)}。最終全範囲調査: ${date(info.fullResearchAt)}。${info.fromDate ? `今回のX検索期間はUTC ${info.fromDate}以上〜${info.toDate}未満。` : `今回のX検索期間はUTC ${info.toDate}より前。`}`;
+}
 export function mergeDelta(plan: ResearchPlan, delta: { text: string; sources: string[] }, audit: DeltaAudit) {
   if (!plan.baseline || plan.mode !== "incremental") throw new Error("差分調査の基準がありません");
   const base = plan.baseline.output;

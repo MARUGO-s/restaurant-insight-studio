@@ -1,5 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.116.0";
-import { type Baseline, type ResearchPlan, type ReuseInfo, type SocialScope, researchKey, planSocialResearch, deltaInstructions, parseDelta, mergeDelta, reuseInfo } from "./social-reuse.ts";
+import { type Baseline, type ResearchPlan, type ReuseInfo, type SocialScope, researchKey, planSocialResearch, deltaInstructions, parseDelta, mergeDelta, reuseInfo, updateSummary } from "./social-reuse.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
@@ -711,7 +711,7 @@ status=doneはAPI工程の正常完了を意味し、すべてのページ・写
 researchCoverageは公式(official)、商圏・競合(market)、X(social)、指定された各グルメサイトのidをtargetIdとして各1行ずつ記録する。siteは読める日本語名。statusはverified（記した範囲を出典で確認）/partial（一部取得・断片のみ）/unavailable（取得できず）のいずれか。API工程が成功しても個別ページまで確認した意味にはならない。scopeには何をどの方法でどこまで読めたか、母数・期間（不明は不明）を、limitationには未確認箇所と判断できない内容を書く。「すべて確認」等の曖昧な範囲表現は禁止。専用X検索の成功とWebでの再確認失敗を分ける。
 keyFindingsにはF1等の一意id、confidence（confirmed=表示・事実を出典で確認 / inferred=根拠からの仮説 / unverified=未確認）、impact（誰のどんな判断に影響しうるか）、counterpoint（反例・別解釈）、verification（現場で確かめる内容・方法）を必須とする。confirmedでも事業効果の因果が証明された意味ではない。
 actionPlanはfindingIdsで課題と結び、owner（担当役割案）、steps（実行手順）、deliverable（作成・修正する具体物）、verification（完了と判断する確認方法）、metric（測定式・データ取得場所・期間）を必須とする。baselineは未提供なら「未取得。○○から取得」とし、targetは根拠のない改善率を避け「初週に基準値を取得後に設定」や検証可能な実施条件を書く。課題はすべて実行または確認施策に対応させる。情報が乏しければ確認事項1件と確認計画を記載し、空配列で完成させない。
-上記10章のidを必ず含める。情報がない章も欠落させず、調査範囲・未確認の理由・次に確認する方法を明記する。columns/rowsで掲載監査、取得済み全コース、競合比較、実施・測定計画を整理する。sourcesと本文中の引用URLには下の調査ノート内URLまたは今回のWeb検索で実際に取得したURLだけを使う。未取得の媒体行はsources=[]でよく、scopeとlimitationに取得方法・制約を記す。URL・投稿日・確認日の推測や架空の例示URLは書かない。
+上記10章のidを必ず含める。情報がない章も欠落させず、調査範囲・未確認の理由・次に確認する方法を明記する。columns/rowsで掲載監査、取得済み全コース、競合比較、実施・測定計画を整理する。sourcesと本文中の引用URLには下の調査ノート内URLまたは今回のWeb検索で実際に取得したURLだけを使う。取得に失敗した個別口コミや再確認用URLはsourcesに入れず、失敗した経緯をlimitationへ書く。トップページの口コミ抜粋だけを読んだ場合、その取得済みトップページを出典とし、未読の個別口コミURLで置き換えない。未取得の媒体行はsources=[]でよく、scopeとlimitationに取得方法・制約を記す。URL・投稿日・確認日の推測や架空の例示URLは書かない。
 【出力】JSON以外の文字・コード囲みは不要。次の構造を厳守する。keyFindingsは要点5〜8件が目安で、詳細な課題は本文に残す。actionPlanは実行単位ごとに具体化する。detailsを短い要約で代用しない。sourcesは実際に調査したhttp(s) URLのみ。列名と各行のセル数を揃える。severityはhigh/medium/lowのいずれか、priorityはP0/P1/P2のいずれかにする。
 {"critique":"主要判断の採否と支持証拠・反証・理由・追加確認","report":{"overallAssessment":"総合判断を一文で","keyMessage":"最初に取り組むこととその理由を2〜3文で","researchCoverage":[{"targetId":"選択媒体id等","site":"対象名","status":"partial","scope":"確認方法と対象範囲・件数・期間","limitation":"確認できないこと","sources":["実際のURL"]}],"keyFindings":[{"id":"F1","title":"具体的な課題","severity":"medium","confidence":"inferred","issue":"現在の表示・体験と問題","evidence":"根拠となる観測事実と出典","impact":"顧客判断への影響仮説","counterpoint":"反例・別解釈・留保","verification":"現場確認の対象・方法","action":"具体的な変更案","sources":["実際のURL"]}],"strengths":["根拠のある強みと利用場面"],"actionPlan":[{"priority":"P1","findingIds":["F1"],"action":"実施内容","reason":"根拠・狙い","owner":"担当役割案","steps":["現場で現在の運用を確認","確認済みの内容で掲載を修正"],"deliverable":"修正するページ・文案等","verification":"完了条件と確認方法","metric":"測定方法・必要データ・比較期間","baseline":"現状値または未取得と取得方法","target":"設定根拠を伴う目標、または基準取得後に設定","effort":"手間の目安","timing":"先に確認/今週/30日以内など"}],"limitations":["未確認・取得失敗・利用できない非公開資料"],"detailedReport":"詳細本文の導入。重複する全文はここに書かず、各章に記述する","detailSections":[{"id":"scope等の指定id","title":"章の見出し","body":"根拠・具体例・反例・変更案を説明する数段落の本文","columns":["比較項目","確認した現状","改善案","確認先"],"rows":[["項目","実際に確認した表示または未確認","提案","確認担当・方法"]],"sources":["実際のURL"]}]}}
 店舗: ${storeName} (${parsed.hostname})
@@ -798,7 +798,7 @@ async function executeJob(db: any, job: any, run: any) {
       const recent = get("social_recent"), history = get("social_history");
       const updates = [recent.reuse, history.reuse].filter((value): value is ReuseInfo => !!value);
       const social: Agent = { id: "social", provider: "xAI Grok", status: "done", researchUpdates: updates,
-        text: `調査の更新履歴（サーバー記録）: ${JSON.stringify(updates)}\n保存済み記録と今回の差分を合わせて検討する。古い体験を今回取得した声や現在の運用と断定しない。前回の反例を落とさず、更新情報と矛盾すれば時点・制約を示す。\n## 最近の体験\n${recent.text}\n\n## 過去の体験・発信との比較\n${history.text}`, sources: [...new Set([...recent.sources, ...history.sources])] };
+        text: `調査の更新履歴\n${updates.map((value, index) => updateSummary(value, index === 0 ? "最近の体験" : "過去の体験")).join("\n")}\n保存済み記録と今回の差分を合わせて検討する。古い体験を今回取得した声や現在の運用と断定しない。前回の反例を落とさず、更新情報と矛盾すれば時点・制約を示す。\n## 最近の体験\n${recent.text}\n\n## 過去の体験・発信との比較\n${history.text}`, sources: [...new Set([...recent.sources, ...history.sources])] };
       output = await synthesize(run.input, [get("market"), get("gourmet"), social], meter("fact_check_synthesis"), job.error_message ?? "");
     } else throw new Error("不明な工程です");
     if (job.job_key.startsWith("social_") && output?.status === "done") {

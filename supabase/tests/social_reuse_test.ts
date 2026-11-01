@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
-import { type Baseline, COVERAGE_TOPICS, researchKey, planSocialResearch, parseDelta, mergeDelta, evidenceKey } from "../functions/restaurant-analysis/social-reuse.ts";
-import { socialResearch, loadSocialBaseline } from "../functions/restaurant-analysis/core.ts";
+import { type Baseline, COVERAGE_TOPICS, researchKey, planSocialResearch, parseDelta, mergeDelta, evidenceKey, reuseInfo, updateSummary } from "../functions/restaurant-analysis/social-reuse.ts";
+import { socialResearch, loadSocialBaseline, buildSynthesisPrompt } from "../functions/restaurant-analysis/core.ts";
 const input = { storeName: "対象店", storeUrl: "https://store.example/", groupName: "系列", selectedSites: [{ id: "tabelog", name: "食べログ", url: "https://tabelog.com/test/" }] };
 const source = "https://x.com/visitor/status/123";
 const baseText = "2026-10-20 料理への好意と接客の反例。価格と予約条件は未確認。古い声を現在と断定しない。".repeat(30);
@@ -132,4 +132,16 @@ Deno.test("completed job checkpoint is recovered without a new paid generation",
     const result = await socialResearch(d.db, run(), { job_key: "social_recent", attempts: 2, output: saved }, "調査", { costDb: d.db, userId: "owner", operation: "social_recent" });
     assert.equal(result, saved); assert.equal(requests.length, 0); assert.equal(d.queries.length, 0);
   });
+});
+
+Deno.test("research summary explains dates and retained evidence without exposing internal identifiers", () => {
+  const plan = planSocialResearch(input, "owner", "social_recent", now(), base());
+  const summary = updateSummary(reuseInfo(plan, []), "最近の体験");
+  assert.ok(summary.includes("2026-10-25")); assert.ok(summary.includes("出典を保持"));
+  assert.ok(!summary.includes("prior-report")); assert.ok(!summary.includes("prior-run"));
+});
+Deno.test("synthesis distinguishes unread detail links from retrieved parent-page excerpts", () => {
+  const prompt = buildSynthesisPrompt(input, []);
+  assert.ok(prompt.includes("取得に失敗した個別口コミや再確認用URLはsourcesに入れず"));
+  assert.ok(prompt.includes("その取得済みトップページを出典とし"));
 });
