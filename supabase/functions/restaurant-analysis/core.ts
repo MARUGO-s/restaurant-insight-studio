@@ -64,8 +64,8 @@ function collectUrls(value: unknown, out = new Set<string>()): string[] {
 // every provider. Preserve the actual URL and do not collapse different pages
 // from the same domain. This is citation collection, not factual verification.
 function sourceUrls(text: string, extra: string[] = []): string[] {
-  const candidates = [...extra, ...(text.match(/https?:\/\/[^\s<>"\\\[\]（）)。、。「」『』【】〈〉《》［］｛｝／]+/g) ?? [])];
-  return [...new Set(candidates.map(value => value.replace(/[.,;!?。、]+$/, "")).filter(value => {
+  const candidates = [...extra, ...(text.match(/https?:\/\/[^\s<>"`\\\[\]（）)。、。「」『』【】〈〉《》［］｛｝／]+/g) ?? [])];
+  return [...new Set(candidates.map(value => value.replace(/[`.,;!?。、]+$/, "")).filter(value => {
     try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password; }
     catch { return false; }
   }))];
