@@ -35,7 +35,7 @@ type TrashResult = { reports: Report[]; nextCursor?: string | null; total?: numb
 type ReportAction = "trash_report" | "restore_report" | "delete_report";
 type ReportState = { state: "active" | "trashed" | "deleted" | "missing"; report?: Report };
 type AnalysisJob = { key: string; status: "pending" | "running" | "done" | "failed"; attempts: number; maxAttempts: number; label: string; error?: string };
-type RunState = { status: "running" | "done" | "failed" | "trashed" | "deleted"; progressStage: string; startedAt?: string; researchFocus?: string; jobs?: AnalysisJob[]; report?: Report; error?: string };
+type RunState = { status: "running" | "done" | "failed" | "trashed" | "deleted"; progressStage: string; startedAt?: string; researchFocus?: string; jobs?: AnalysisJob[]; report?: Report; error?: string; canRegenerateSynthesis?: boolean; synthesisRevision?: string };
 type ActiveRun = { runId: string; startedAt: string; storeName: string; researchFocus?: string };
 const RESEARCH_FOCUS_LIMIT = 2000;
 const RUN_STAGES = [
@@ -144,13 +144,14 @@ function ResearchFocusNote({ text }: { text?: string }) {
 const sumPrices = (events: CostEvent[]) => events.reduce((sum, event) => sum + (event.list_price_usd ?? 0), 0);
 const operationNames: Record<string, string> = { market_research: "市場・競合調査", gourmet_research: "グルメ媒体調査", gourmet_fallback_research: "グルメ媒体調査（過去の代替AI）", social_research: "X・SNS調査", social_recent: "Xの直近の声", social_history: "Xの過去の傾向・反証", fact_check: "反証・確認", synthesis: "レポート統合", fact_check_synthesis: "反証・統合", followup_question: "レポートへの質問", provider_diagnostic: "Gemini接続確認" };
 
-function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onCheck, onClose }: { run: ActiveRun; state: RunState | null; polling: boolean; retrying: boolean; busy: boolean; notice: string; onRetry: () => void; onCheck: () => void; onClose: () => void }) {
+function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onRegenerate, onCheck, onClose }: { run: ActiveRun; state: RunState | null; polling: boolean; retrying: boolean; busy: boolean; notice: string; onRetry: () => void; onRegenerate: () => void; onCheck: () => void; onClose: () => void }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   const elapsed = Math.max(0, Math.floor((now - new Date(state?.startedAt || run.startedAt).getTime()) / 1000));
   const elapsedLabel = Number.isFinite(elapsed) ? `${Math.floor(elapsed / 60)}分${String(elapsed % 60).padStart(2, "0")}秒` : "確認中";
   const jobs = RUN_STAGES.map((stage) => state?.jobs?.find((job) => job.key === stage.key) ?? { ...stage, status: "pending" as const, attempts: 0, maxAttempts: 3 });
   const failed = state?.status === "failed";
+  const regenerationAvailable = failed && state?.canRegenerateSynthesis === true && !!state.synthesisRevision;
   const done = jobs.filter((job) => job.status === "done").length;
   const statusNames = { pending: "待機中", running: "調査中", done: "完了", failed: "未完了" };
   return <section className={`panel durable-progress ${failed ? "has-failure" : ""}`} aria-label="解析の進行状況">
@@ -159,8 +160,8 @@ function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onC
     <ResearchFocusNote text={state?.researchFocus ?? run.researchFocus}/>
     {notice && <div className="run-connection-notice" role="status">{notice}</div>}
     <ol className="run-job-list">{jobs.map((job, index) => <li key={job.key} className={`run-job ${job.status}`}><span className="run-job-mark" aria-hidden="true">{job.status === "done" ? "✓" : index + 1}</span><div><b>{job.label || RUN_STAGES[index].label}</b><small>{job.key === "synthesis" && job.status === "running" ? "検証・執筆中" : statusNames[job.status]}{job.attempts > 0 ? ` · 試行 ${job.attempts}/${job.maxAttempts}回` : ""}</small>{job.error && <p>{job.status === "running" || job.status === "pending" ? "前回の試行: " : ""}{job.error}</p>}</div></li>)}</ol>
-    {failed && <div className="run-failure-note"><b>完成済みの調査結果を保持しています。</b><p>{state?.error || "完了しなかった調査があります。"}</p><p>再開すると、同じ解析の未完了の調査を再試行します。再試行分のAPI料金が発生する場合があります。この解析を閉じても、保存済みの調査結果や料金記録は削除されません。</p></div>}
-    <div className="run-actions">{failed && <button type="button" className="primary-button" disabled={busy || polling || retrying || !!notice} onClick={onRetry}>{retrying ? "再開を確認しています…" : "未完了の調査を再開"}</button>}{!polling && <button type="button" className="run-check-button" disabled={busy || retrying} onClick={onCheck}>進行状況を再確認</button>}{failed && <button type="button" className="run-check-button" disabled={busy || polling || retrying || !!notice} onClick={onClose}>この解析を閉じて新しく分析</button>}</div>
+    {failed && <div className="run-failure-note"><b>完成済みの調査結果を保持しています。</b><p>{state?.error || "完了しなかった調査があります。"}</p><p>{regenerationAvailable ? "保存済み応答の再確認では、新しいAI生成を行いません。統合を作り直す場合だけ、別途確認のうえ追加API料金が発生します。完了済みの4つの専門調査は再実行しません。" : "再開すると、同じ解析の未完了の調査を再試行します。再試行分のAPI料金が発生する場合があります。"}この解析を閉じても、保存済みの調査結果や料金記録は削除されません。</p></div>}
+    <div className="run-actions">{failed && <button type="button" className="primary-button" disabled={busy || polling || retrying || !!notice} onClick={onRetry}>{retrying ? "再開を確認しています…" : regenerationAvailable ? "保存済み応答を再確認（追加生成なし）" : "未完了の調査を再開"}</button>}{regenerationAvailable && !busy && !polling && !retrying && !notice && <button type="button" className="run-check-button" onClick={onRegenerate}>統合だけ作り直す（追加API料金）</button>}{!polling && <button type="button" className="run-check-button" disabled={busy || retrying} onClick={onCheck}>進行状況を再確認</button>}{failed && <button type="button" className="run-check-button" disabled={busy || polling || retrying || !!notice} onClick={onClose}>この解析を閉じて新しく分析</button>}</div>
   </section>;
 }
 
@@ -249,6 +250,7 @@ export default function App() {
   const reportRevision = useRef(0);
   const trashRequest = useRef(0);
   const reportMutation = useRef(false);
+  const runMutation = useRef(false);
   const activePoll = useRef<{ runId: string; userId: string; controller: AbortController } | null>(null);
 
   const selected = useMemo(() => reports.find((report) => report.id === selectedId) ?? reports[0] ?? null, [reports, selectedId]);
@@ -396,7 +398,7 @@ export default function App() {
       if (nextUserId === currentUserId.current) { if (!nextUserId) setLoading(false); return; }
       currentUserId.current = nextUserId;
       const epoch = ++authEpoch.current;
-      ++reportRevision.current; reportMutation.current = false;
+      ++reportRevision.current; reportMutation.current = false; runMutation.current = false;
       setTrashedReports([]); setTrashCount(0); setTrashCursor(null); setTrashLoading(false); setTrashError(""); setBusyReportId(null); setDeleteTarget(null); setReportNotice(null);
       activePoll.current?.controller.abort(); activePoll.current = null;
       setReports([]); setCosts([]); setSelectedId(null); setActiveRun(null); setRunState(null); setRunNotice(""); setWorking(null); setPolling(false); setRetrying(false); setDiscoveringRun(!!nextUserId); setError("");
@@ -466,7 +468,8 @@ export default function App() {
   }
   async function retryAnalysisRun() {
     const userId = currentUserId.current, epoch = authEpoch.current, run = activeRun;
-    if (!userId || !run || retrying || working || runState?.status !== "failed") return;
+    if (!userId || session?.user.id !== userId || !run || runMutation.current || retrying || working || polling || activePoll.current || runNotice || runState?.status !== "failed") return;
+    runMutation.current = true;
     setRetrying(true); setError(""); setRunNotice("");
     try {
       await invoke<{ runId: string; status: "running" }>({ action: "retry_run", runId: run.runId });
@@ -475,11 +478,43 @@ export default function App() {
       void completeAnalysisRun(run, userId);
     } catch (failure) {
       if (currentUserId.current === userId && authEpoch.current === epoch) setRunNotice(`再開の結果を確認できませんでした。重複して送信せず「進行状況を再確認」を押してください。${failure instanceof Error ? ` ${failure.message}` : ""}`);
-    } finally { if (currentUserId.current === userId && authEpoch.current === epoch) setRetrying(false); }
+    } finally { if (currentUserId.current === userId && authEpoch.current === epoch) { runMutation.current = false; setRetrying(false); } }
+  }
+  async function regenerateSynthesis() {
+    const userId = currentUserId.current, epoch = authEpoch.current, run = activeRun;
+    const expectedRevision = runState?.synthesisRevision;
+    if (!userId || session?.user.id !== userId || !run || runMutation.current || retrying || working || polling || activePoll.current || runNotice || runState?.status !== "failed" || runState.canRegenerateSynthesis !== true || !expectedRevision) return;
+    // Ref guard takes effect synchronously, before React can render disabled controls.
+    runMutation.current = true;
+    const current = () => currentUserId.current === userId && authEpoch.current === epoch;
+    try {
+      if (!window.confirm("完了済みの4つの専門調査を保持し、統合だけを1回作り直します。追加API料金が発生します（金額は未確定）。失敗しても自動で再生成しません。追加料金に同意して実行しますか？")) return;
+      if (!current()) return;
+      setRetrying(true); setError("");
+      // Keep each account/run/completed-response identity across reloads and unknown outcomes.
+      // Fail closed if durable storage is unavailable; never send an unrecorded paid attempt.
+      const key = `restaurantInsightSynthesisRequest:${JSON.stringify([userId, run.runId, expectedRevision])}`;
+      let requestId = localStorage.getItem(key);
+      if (requestId === null) {
+        requestId = crypto.randomUUID();
+        localStorage.setItem(key, requestId);
+      }
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestId) || localStorage.getItem(key) !== requestId) throw new Error("再生成の識別情報を安全に保存できませんでした。");
+      const result = await invoke<{ runId: string; status: "running" }>({ action: "regenerate_synthesis", runId: run.runId, requestId, expectedRevision, confirmAdditionalCost: true });
+      if (!current()) return;
+      if (result?.runId !== run.runId || result?.status !== "running") throw new Error("再生成の受付応答を確認できませんでした。");
+      setRunState((previous) => previous ? { ...previous, status: "running", canRegenerateSynthesis: false, error: undefined } : null);
+      // Only poll the same run; never automatically repeat the paid request.
+      void completeAnalysisRun(run, userId);
+    } catch (failure) {
+      if (current()) setRunNotice(`統合の再生成の結果を確認できませんでした。すでに受け付けられ、料金が発生している可能性があります。自動で再送信せず「進行状況を再確認」から確認してください。${failure instanceof Error ? ` ${failure.message}` : ""}`);
+    } finally {
+      if (current()) { runMutation.current = false; setRetrying(false); }
+    }
   }
   function closeFailedAnalysisRun() {
     const userId = currentUserId.current;
-    if (!userId || !activeRun || runState?.status !== "failed" || working || polling || retrying || runNotice) return;
+    if (!userId || runMutation.current || !activeRun || runState?.status !== "failed" || working || polling || retrying || runNotice) return;
     clearActiveRun(userId, activeRun.runId);
     setActiveRun(null); setRunState(null); setRunNotice(""); setError(""); setResearchExpanded(true); setPage("analysis");
   }
@@ -579,7 +614,7 @@ export default function App() {
           {missing.length > 0 && <div className="config-banner"><b>AI APIキーの設定が必要です</b><span>{missing.join("・")}のキーをSupabase DashboardのEdge Functions → Secretsに登録してください。キーはDBテーブルやブラウザーには保存しません。</span></div>}
           {error && <div className="error-banner"><b>処理を完了できませんでした</b><span>{error}</span></div>}
           {!activeRun && runNotice && <div className="run-connection-notice" role="status">{runNotice}</div>}
-          {activeRun && <RunProgress run={activeRun} state={runState} polling={polling} retrying={retrying} busy={working === "question"} notice={runNotice} onRetry={() => { void retryAnalysisRun(); }} onCheck={() => { const userId = currentUserId.current; if (userId && !working) void completeAnalysisRun(activeRun, userId); }} onClose={closeFailedAnalysisRun}/>}
+          {activeRun && <RunProgress run={activeRun} state={runState} polling={polling} retrying={retrying} busy={working === "question"} notice={runNotice} onRetry={() => { void retryAnalysisRun(); }} onRegenerate={() => { void regenerateSynthesis(); }} onCheck={() => { const userId = currentUserId.current; if (userId && !working && !retrying && !runMutation.current) void completeAnalysisRun(activeRun, userId); }} onClose={closeFailedAnalysisRun}/>}
           {working === "analysis" && !activeRun && <div className="panel live-progress"><div className="spinner large"/><div><b>調査の開始を確認しています</b><span>解析が登録されると、各調査の進行状況を表示します。</span></div></div>}
           {selected ? <>
             <section className="report-heading panel"><div><span className="eyebrow">ANALYSIS REPORT · {dateLabel(selected.createdAt)}</span><h2>{selected.storeName}</h2><a href={selected.storeUrl} target="_blank" rel="noreferrer">{selected.storeUrl} ↗</a><div className="selected-site-tags">{(selected.selectedSites ?? []).map((site) => <span key={site.id}>{site.name}</span>)}</div></div><div className="report-header-actions"><span className={`complete-badge ${selected.agents.some((agent) => agent.status !== "done") ? "partial-badge" : ""}`}><i/>{selected.agents.some((agent) => agent.status !== "done") ? "一部の調査が未完了" : "レポート作成完了"}</span><div className="report-action-buttons"><button type="button" onClick={() => window.print()}>印刷・PDF保存</button><button type="button" className="report-trash-button" disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", selected); }}><TrashIcon/>ゴミ箱へ移動</button></div></div></section>

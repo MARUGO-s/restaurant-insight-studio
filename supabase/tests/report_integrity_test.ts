@@ -17,6 +17,17 @@ const draft = (report: any) => ({ version: 1 as const, requiredReportVersion: 3 
   toolSources: [evidenceUrl], costId: "cost", responseId: "response", responseStatus: "completed" as const });
 const finish = (report = integrityReport(), agents = integrityAgents()) => finalizeSynthesis(qualityInput, agents, draft(report));
 
+Deno.test("synthesis prompt supplies recorded source URLs rather than requiring guessed citation reconstruction", () => {
+  const agents = integrityAgents();
+  const recorded = "https://example.test/articles/unique-recorded-source?edition=2";
+  agents[1].sources.push(recorded);
+  const prompt = buildSynthesisPrompt(qualityInput, agents);
+  assert.ok(prompt.includes(JSON.stringify(recorded)));
+  assert.match(prompt, /出典URL台帳/);
+  assert.match(prompt, /ドメイン.*記事番号.*組み替え/);
+  assert.match(prompt, /未記録.*取得.*出典/);
+});
+
 Deno.test("v3 requires per-agent verbatim claim reviews, decisions and traceable evidence", async () => {
   const r = integrityReport(); delete r.claimReviews;
   await assert.rejects(() => finish(r), /claimReviews/);
@@ -33,6 +44,66 @@ Deno.test("v3 requires per-agent verbatim claim reviews, decisions and traceable
   const ok = await finish();
   assert.deepEqual(JSON.parse(ok.report_row.report).claimReviews, integrityReport().claimReviews);
   assert.equal(JSON.parse(ok.report_row.report).qualityGate.version, 3);
+});
+
+Deno.test("paired bold omissions restore the same agent raw quotation without changing the original draft", async () => {
+  const agents = integrityAgents(), report = integrityReport();
+  const raw = "対象は、新宿 **1階**の店舗です。\n一覧は**2026年10月27日更新、3件掲載**。";
+  agents[0].text = raw;
+  report.claimReviews[0].claim = raw.replaceAll("**", "");
+  const original = draft(report), snapshot = structuredClone({ agents, original, report });
+  const result = await finalizeSynthesis(qualityInput, agents, original);
+  const saved = JSON.parse(result.report_row.report);
+  assert.equal(saved.claimReviews[0].claim, raw);
+  assert.equal(saved.qualityGate.version, 3);
+  assert.deepEqual({ agents, original, report }, snapshot);
+  assert.deepEqual(result.synthesisDraft, original);
+  assert.deepEqual(result.report_row.agents, agents);
+  assert.deepEqual(saved.qualityGate.claimQuotationRecovery.corrections, [{ path: "claimReviews[0].claim", agentId: "market",
+    kind: "paired_bold_delimiters", originalQuotation: report.claimReviews[0].claim, restoredQuotation: raw }]);
+  assert.equal(saved.qualityGate.claimQuotationRecovery.additionalGenerations, 0);
+  const content = structuredClone(saved);
+  delete content.qualityGate; delete content.productInventory; delete content.originalProductInventory;
+  assert.deepEqual(content, { ...report, claimReviews: report.claimReviews.map((r: any, index: number) => index ? r : { ...r, claim: raw }) });
+});
+
+Deno.test("claim validation identifies every invalid review field and missing agent", async () => {
+  const cases: [string, (r: any) => void][] = [
+    ["claimReviews[1]", r => { r.claimReviews[1] = null; }],
+    ["claimReviews[1].agentId", r => { r.claimReviews[1].agentId = "unknown"; }],
+    ["claimReviews[1].claim", r => { r.claimReviews[1].claim = ""; }],
+    ["claimReviews[1].claim", r => { r.claimReviews[1].claim = "異なる主張"; }],
+    ["claimReviews[1].decision", r => { r.claimReviews[1].decision = "invalid"; }],
+    ["claimReviews[1].reason", r => { r.claimReviews[1].reason = ""; }],
+    ["claimReviews[1].sources", r => { r.claimReviews[1].sources = ["https://unknown.test/"]; }],
+    ["claimReviews[1].sources", r => { r.claimReviews[1].sources = null; }],
+    ["claimReviews[1].sources", r => { r.claimReviews[1].decision = "supported"; }],
+    ["claimReviews[3].claim", r => { r.claimReviews.push(r.claimReviews[1]); }],
+    ["social", r => { r.claimReviews.pop(); }],
+  ];
+  for (const [path, mutate] of cases) {
+    const r = integrityReport(); mutate(r);
+    await assert.rejects(() => finish(r), (error: Error) => { assert.ok(error.message.includes(path), error.message); return true; });
+  }
+  const r = integrityReport(); r.claimReviews[0].claim = "不一致"; r.claimReviews[1].reason = "";
+  await assert.rejects(() => finish(r), (error: Error) => {
+    assert.ok(error.message.includes("claimReviews[0].claim")); assert.ok(error.message.includes("claimReviews[1].reason")); return true;
+  });
+});
+
+Deno.test("restored Markdown cannot bypass a confirmed-finding contradiction", async () => {
+  for (const decision of ["unverified", "rejected", "conditional"]) {
+    for (const exact of [false, true]) {
+      const agents = integrityAgents(), r = integrityReport();
+      agents[1].text = "店舗では**予約で離脱しやすい**。";
+      r.claimReviews[1].claim = exact ? agents[1].text : "店舗では予約で離脱しやすい。";
+      r.claimReviews[1].decision = decision;
+      r.claimReviews[1].sources = decision === "conditional" ? [evidenceUrl] : [];
+      r.keyFindings[0].issue = "店舗では予約で離脱しやすい。";
+      r.keyFindings[0].confidence = "confirmed";
+      await assert.rejects(() => finish(r, agents), /claimReviews\[1\]\.claim.*未採用.*断定/);
+    }
+  }
 });
 
 Deno.test("v3 rejects missing scope and mixed finding/action classifications", async () => {

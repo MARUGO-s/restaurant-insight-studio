@@ -1,3 +1,5 @@
+import { visibleClaimText } from "./claim-quotation-recovery.ts";
+
 // Structural review receipts are not proof that a URL semantically supports a claim.
 // The synthesis model must perform that review; these checks reject missing,
 // untraceable or internally inconsistent receipts without another paid call.
@@ -11,20 +13,29 @@ export function validateReportIntegrity(report: Record<string, any>, agents: Rev
   const reviews = report.claimReviews;
   const seen = new Set<string>();
   if (!Array.isArray(reviews)) throw new Error("claimReviews: 専門調査の主張審査が必要です");
-  for (const review of reviews) {
-    const agent = agents.find(a => a.id === review?.agentId);
-    const key = JSON.stringify([review?.agentId, review?.claim]);
-    if (!object(review) || !agent || !nonempty(review.claim) || !agent.text.includes(review.claim)
-      || !["supported", "conditional", "unverified", "rejected"].includes(review.decision)
-      || !nonempty(review.reason) || !validSources(review.sources) || seen.has(key)
-      || (["supported", "conditional"].includes(review.decision) && !review.sources.length)) {
-      throw new Error("claimReviews: 逐語引用・担当・採否・理由・追跡可能な出典が不完全です");
-    }
+  const issues: string[] = [];
+  for (const [index, review] of reviews.entries()) {
+    const path = `claimReviews[${index}]`;
+    if (!object(review)) { issues.push(`${path}: 審査オブジェクトが必要です`); continue; }
+    const matchingAgents = agents.filter(a => a.id === review.agentId);
+    const agent = matchingAgents.length === 1 ? matchingAgents[0] : undefined;
+    if (!agent) issues.push(`${path}.agentId: 一意に存在する専門担当idが必要です`);
+    if (!nonempty(review.claim)) issues.push(`${path}.claim: 空でない逐語引用が必要です`);
+    else if (agent && !agent.text.includes(review.claim)) issues.push(`${path}.claim: 指定担当の原文に連続する逐語引用がありません（安全な太字復元も不成立）`);
+    if (!["supported", "conditional", "unverified", "rejected"].includes(review.decision)) issues.push(`${path}.decision: supported/conditional/unverified/rejectedを指定してください`);
+    if (!nonempty(review.reason)) issues.push(`${path}.reason: 支持・反証と採否の理由が必要です`);
+    if (!validSources(review.sources)) issues.push(`${path}.sources: 取得済みの追跡可能なURL配列が必要です`);
+    else if (["supported", "conditional"].includes(review.decision) && !review.sources.length) issues.push(`${path}.sources: supported/conditionalには根拠URLが必要です`);
+    const key = JSON.stringify([review.agentId, review.claim]);
+    if (seen.has(key)) issues.push(`${path}.claim: 同じ担当・逐語引用の審査が重複しています`);
     seen.add(key);
   }
-  if (agents.some(a => a.text.trim() && !reviews.some(r => r.agentId === a.id))) {
-    throw new Error("claimReviews: 全専門担当の主要判断を審査してください");
+  for (const agent of agents) {
+    if (agent.text.trim() && !reviews.some(r => object(r) && r.agentId === agent.id)) {
+      issues.push(`claimReviews.agentId: 専門担当 ${agent.id} の主要判断の審査がありません`);
+    }
   }
+  if (issues.length) throw new Error(issues.join("\n"));
   const findings = report.keyFindings ?? [], actions = report.actionPlan ?? [];
   const scopes = ["store", "research", "verification"];
   if (findings.some((f: any) => !scopes.includes(f.scope)) || actions.some((a: any) => !scopes.includes(a.scope)
@@ -32,11 +43,14 @@ export function validateReportIntegrity(report: Record<string, any>, agents: Rev
     throw new Error("scope: 課題と対応施策をstore/research/verificationに分類し、異なる分類は分けてください");
   }
   // Literal recurrence only: paraphrases and factual entailment still require human review.
-  for (const review of reviews.filter(r => r.decision !== "supported")) {
-    const claims = review.claim.split(/[。！？\n]+/).map((s: string) => s.trim()).filter((s: string) => s.length >= 8);
+  for (const [index, review] of reviews.entries()) {
+    if (review.decision === "supported") continue;
+    const claims = [review.claim, visibleClaimText(review.claim)].flatMap(text => text.split(/[。！？\n]+/))
+      .map((s: string) => s.trim()).filter((s: string) => s.length >= 8);
     if (findings.some((f: any) => f.confidence === "confirmed"
-      && claims.some((claim: string) => [f.title, f.issue, f.evidence].some(value => typeof value === "string" && value.includes(claim))))) {
-      throw new Error("claimReviews: 未採用または条件付きの主張を確認済み課題として断定できません");
+      && claims.some((claim: string) => [f.title, f.issue, f.evidence].some(value => typeof value === "string"
+        && (value.includes(claim) || visibleClaimText(value).includes(claim)))))) {
+      throw new Error(`claimReviews[${index}].claim: 未採用または条件付きの主張を確認済み課題として断定できません`);
     }
   }
   // Bounded detection of the audited completeness-rate defect, not a ban on
