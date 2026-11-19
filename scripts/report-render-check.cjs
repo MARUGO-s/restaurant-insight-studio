@@ -127,20 +127,24 @@ const appAst=ts.createSourceFile('App.tsx',appSource,ts.ScriptTarget.ES2022,true
 let agentsBranch;
 let stageDeclaration;
 let titleDeclaration;
+let dateDeclaration;
+let directPageDeclaration;
 const visit=node=>{
   if(ts.isBinaryExpression(node)&&node.operatorToken.kind===ts.SyntaxKind.AmpersandAmpersandToken&&/^tab\s*===\s*"agents"$/.test(node.left.getText(appAst))) agentsBranch=node.right.getText(appAst);
   if(ts.isVariableDeclaration(node)&&node.name.getText(appAst)==='RUN_STAGES') stageDeclaration=`const ${node.getText(appAst)};`;
   if(ts.isFunctionDeclaration(node)&&node.name?.text==='agentTitle') titleDeclaration=node.getText(appAst);
+  if(ts.isFunctionDeclaration(node)&&node.name?.text==='dateLabel') dateDeclaration=node.getText(appAst);
+  if(ts.isFunctionDeclaration(node)&&node.name?.text==='DirectPageStatus') directPageDeclaration=node.getText(appAst);
   ts.forEachChild(node,visit);
 };
 visit(appAst);
-assert(agentsBranch&&stageDeclaration&&titleDeclaration,'actual agents-tab branch is present');
+assert(agentsBranch&&stageDeclaration&&titleDeclaration&&dateDeclaration&&directPageDeclaration,'actual agents-tab branch is present');
 const agentModule=new (require('module').Module)(root+'/src/AgentsTab.check.cjs');
 agentModule.filename=root+'/src/AgentsTab.check.cjs';
 agentModule.paths=moduleObject.paths;
 agentModule.require=id=>id==='./ReportView'?moduleObject.exports:req(id);
 const reportViewImport=appAst.statements.find(node=>ts.isImportDeclaration(node)&&node.moduleSpecifier.text==='./ReportView').getText(appAst);
-agentModule._compile(ts.transpileModule(`${reportViewImport}\n${stageDeclaration}\n${titleDeclaration}\nexport function AgentsTab({selected}: any) { return ${agentsBranch}; }`,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,agentModule.filename);
+agentModule._compile(ts.transpileModule(`${reportViewImport}\n${stageDeclaration}\n${titleDeclaration}\n${dateDeclaration}\n${directPageDeclaration}\nexport function AgentsTab({selected}: any) { return ${agentsBranch}; }`,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,agentModule.filename);
 const claimReviews=['supported','conditional','unverified','rejected','future'].map((decision,i)=>({agentId:'gourmet',claim:`検証対象の主張${i}`,decision,reason:`統合判断の理由${i}`,sources:[`https://example.com/review/${i}`,'javascript:alert(1)']}));
 claimReviews.push({agentId:'market',claim:'別担当だけの主張',decision:'rejected',reason:'別担当だけの理由',sources:[]});
 const reviewedClaims={...scoped,claimReviews};
@@ -159,12 +163,20 @@ assert(!agentsHtml.includes('別担当だけの主張')&&!agentsHtml.includes('�
 assert(!agentsHtml.includes('href="javascript:'));
 assert(agentsHtml.includes('原文の後半も残す。'));
 const legacyAgentHtml=renderAgents(fixture);
+assert(!legacyAgentHtml.includes('指定ページの本文取得状況'));
 assert(legacyAgentHtml.includes('API応答取得≠全主張検証'));
 assert(legacyAgentHtml.includes('この担当の主張別の採否記録はありません'));
 assert(!legacyAgentHtml.includes('採用せず'),'no inferred rejection for old reports');
 assert(renderAgents({...fixture,claimReviews:[]}).includes('この担当の主張別の採否記録はありません'));
 const errorAgentHtml=render(agentModule.exports.AgentsTab,{selected:{report:JSON.stringify(reviewedClaims),agents:[{...syntheticAgent,status:'partial',error:'取得時の制約'}]}});
 assert(errorAgentHtml.includes('取得時の制約')&&errorAgentHtml.includes('原文の後半も残す。'),'partial/error does not discard original text');
+const directPageHtml=render(agentModule.exports.AgentsTab,{selected:{report:JSON.stringify(reviewedClaims),agents:[{...syntheticAgent,directPages:[
+  {kind:'official',url:'https://example.com/official',status:'retrieved',retrievedAt:'2026-11-20T00:00:00.000Z'},
+  {kind:'tabelog-store',url:'https://example.com/store',status:'unavailable',reason:'ページがHTTP 403を返しました'},
+  {kind:'tabelog-courses',url:'https://example.com/courses',status:'retrieved',truncated:true},
+]}]}});
+for(const label of ['指定ページの本文取得状況','本文を取得できず、検索で補足','ページがHTTP 403を返しました','本文を一部取得']) assert(directPageHtml.includes(label),label);
+assert(directPageHtml.includes('href="https://example.com/official"')&&/datetime="2026-11-20T00:00:00\.000Z"/i.test(directPageHtml));
 const newFormat=typeof report.qualityGate?.version === 'number' && report.qualityGate.version >= 2;
 assert.equal(actual.includes('次の解析から適用されます'),!newFormat);
 assert(render(IntegratedReport,{text:JSON.stringify(fixture)}).includes('次の解析から適用されます'));

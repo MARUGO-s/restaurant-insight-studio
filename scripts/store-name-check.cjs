@@ -9,7 +9,7 @@ const {renderToStaticMarkup} = require('react-dom/server');
 const file = path.join(root, 'src/StoreNameInput.tsx');
 assert(fs.existsSync(file), '店舗候補から選択できる自由入力コンポーネントが必要');
 const mod = new Module(file); mod.filename = file; mod.paths = Module._nodeModulePaths(root);
-mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,file);
+mod._compile(ts.transpileModule(fs.readFileSync(file,'utf8'), {compilerOptions:{module:ts.ModuleKind.CommonJS,esModuleInterop:true,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,file);
 const {StoreNameInput, STORE_NAMES, storeNameOptions, STORE_CATALOG, officialStoreUrl} = mod.exports;
 assert(Array.isArray(STORE_CATALOG), '店舗ごとの公式URL定義が必要');
 assert.equal(STORE_CATALOG.length, 23);

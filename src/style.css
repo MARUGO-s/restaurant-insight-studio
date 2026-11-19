@@ -141,6 +141,20 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
   .action-measurement dl>div{break-inside:avoid;margin:10px 0}
 }
 
+.direct-page-status {
+  margin: 16px 0;
+  padding: 12px 16px;
+  border: 1px solid #dce5d7;
+  border-radius: 10px;
+  background: #f4f7f2;
+  color: #435442;
+  font-size: .875rem;
+}
+.direct-page-status ul { margin: 8px 0 0; padding: 0; list-style: none; }
+.direct-page-status li { display: flex; flex-wrap: wrap; gap: 2px 12px; padding: 4px 0; }
+.direct-page-status a { color: #324936; font-weight: 650; text-decoration: underline; }
+.direct-page-status time, .direct-page-reason { color: #52604f; }
+
 /* Give product conditions enough space; stacked mobile cells keep full width. */
 .product-inventory .report-table th:nth-child(1){width:28%}
 .product-inventory .report-table th:nth-child(2){width:16%}

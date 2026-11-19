@@ -11,7 +11,15 @@ import type { TrashItem } from "./ReportTrash";
 import { GeminiConnectionCheck, ProviderErrorDetails } from "./ProviderDiagnostics";
 import type { ProviderDiagnosticError } from "./ProviderDiagnostics";
 
-type Agent = { id: string; provider: string; status: "done" | "partial" | "error"; text: string; sources: string[]; error?: string };
+type DirectPageReceipt = {
+  kind: "official" | "tabelog-store" | "tabelog-courses";
+  url: string;
+  status: "retrieved" | "unavailable" | "search_only";
+  retrievedAt?: string;
+  reason?: string;
+  truncated?: boolean;
+};
+type Agent = { id: string; provider: string; status: "done" | "partial" | "error"; text: string; sources: string[]; error?: string; directPages?: DirectPageReceipt[] };
 type Followup = { question: string; answer: string; sources: string[]; at: string };
 type SiteTarget = { id: string; name: string; url: string };
 type Report = {
@@ -34,7 +42,7 @@ type Page = "analysis" | "costs" | "trash";
 type TrashResult = { reports: Report[]; nextCursor?: string | null; total?: number };
 type ReportAction = "trash_report" | "restore_report" | "delete_report";
 type ReportState = { state: "active" | "trashed" | "deleted" | "missing"; report?: Report };
-type AnalysisJob = { key: string; status: "pending" | "running" | "done" | "failed"; attempts: number; maxAttempts: number; label: string; error?: string };
+type AnalysisJob = { key: string; status: "pending" | "running" | "done" | "failed"; attempts: number; maxAttempts: number; label: string; error?: string; directPages?: DirectPageReceipt[] };
 type RunState = { status: "running" | "done" | "failed" | "trashed" | "deleted"; progressStage: string; startedAt?: string; researchFocus?: string; jobs?: AnalysisJob[]; report?: Report; error?: string; canRegenerateSynthesis?: boolean; synthesisRevision?: string };
 type ActiveRun = { runId: string; startedAt: string; storeName: string; researchFocus?: string };
 const RESEARCH_FOCUS_LIMIT = 2000;
@@ -141,6 +149,19 @@ function ResearchFocusNote({ text }: { text?: string }) {
   if (!text) return null;
   return <section className="research-focus-note" aria-label="この調査で指定した重点事項"><b>この調査で指定した重点事項</b><p>{text}</p></section>;
 }
+function DirectPageStatus({ pages }: { pages?: DirectPageReceipt[] }) {
+  if (!pages?.length) return null;
+  const labels = { official: "公式サイト", "tabelog-store": "食べログ 店舗情報", "tabelog-courses": "食べログ コース一覧" };
+  return <section className="direct-page-status" aria-label="指定ページの本文取得状況">
+    <b>指定ページの本文取得状況</b>
+    <ul>{pages.map((page) => <li key={page.kind}>
+      {page.url.startsWith("https://") ? <a href={page.url} target="_blank" rel="noreferrer">{labels[page.kind]} ↗</a> : <span>{labels[page.kind]}</span>}
+      <span>{page.status === "retrieved" ? (page.truncated ? "本文を一部取得" : "本文を取得") : page.status === "unavailable" ? "本文を取得できず、検索で補足" : "検索で確認"}</span>
+      {page.retrievedAt && <time dateTime={page.retrievedAt}>{dateLabel(page.retrievedAt)}</time>}
+      {page.reason && <span className="direct-page-reason">{page.reason}</span>}
+    </li>)}</ul>
+  </section>;
+}
 const sumPrices = (events: CostEvent[]) => events.reduce((sum, event) => sum + (event.list_price_usd ?? 0), 0);
 const operationNames: Record<string, string> = { market_research: "市場・競合調査", gourmet_research: "グルメ媒体調査", gourmet_fallback_research: "グルメ媒体調査（過去の代替AI）", social_research: "X・SNS調査", social_recent: "Xの直近の声", social_history: "Xの過去の傾向・反証", fact_check: "反証・確認", synthesis: "レポート統合", fact_check_synthesis: "反証・統合", followup_question: "レポートへの質問", provider_diagnostic: "Gemini接続確認" };
 
@@ -160,6 +181,7 @@ function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onR
     <ResearchFocusNote text={state?.researchFocus ?? run.researchFocus}/>
     {notice && <div className="run-connection-notice" role="status">{notice}</div>}
     <ol className="run-job-list">{jobs.map((job, index) => <li key={job.key} className={`run-job ${job.status}`}><span className="run-job-mark" aria-hidden="true">{job.status === "done" ? "✓" : index + 1}</span><div><b>{job.label || RUN_STAGES[index].label}</b><small>{job.key === "synthesis" && job.status === "running" ? "検証・執筆中" : statusNames[job.status]}{job.attempts > 0 ? ` · 試行 ${job.attempts}/${job.maxAttempts}回` : ""}</small>{job.error && <p>{job.status === "running" || job.status === "pending" ? "前回の試行: " : ""}{job.error}</p>}</div></li>)}</ol>
+    <DirectPageStatus pages={state?.jobs?.find((job) => job.key === "gourmet")?.directPages}/>
     {failed && <div className="run-failure-note"><b>完成済みの調査結果を保持しています。</b><p>{state?.error || "完了しなかった調査があります。"}</p><p>{regenerationAvailable ? "保存済み応答の再確認では、新しいAI生成を行いません。統合を作り直す場合だけ、別途確認のうえ追加API料金が発生します。完了済みの4つの専門調査は再実行しません。" : "再開すると、同じ解析の未完了の調査を再試行します。再試行分のAPI料金が発生する場合があります。"}この解析を閉じても、保存済みの調査結果や料金記録は削除されません。</p></div>}
     <div className="run-actions">{failed && <button type="button" className="primary-button" disabled={busy || polling || retrying || !!notice} onClick={onRetry}>{retrying ? "再開を確認しています…" : regenerationAvailable ? "保存済み応答を再確認（追加生成なし）" : "未完了の調査を再開"}</button>}{regenerationAvailable && !busy && !polling && !retrying && !notice && <button type="button" className="run-check-button" onClick={onRegenerate}>統合だけ作り直す（追加API料金）</button>}{!polling && <button type="button" className="run-check-button" disabled={busy || retrying} onClick={onCheck}>進行状況を再確認</button>}{failed && <button type="button" className="run-check-button" disabled={busy || polling || retrying || !!notice} onClick={onClose}>この解析を閉じて新しく分析</button>}</div>
   </section>;
@@ -601,7 +623,7 @@ export default function App() {
             </details>
             <div className="research-roles">
               <div><span className="role-icon market">M</span><span><b>市場・競合</b><small>GPT-6.1 Terra · Web調査</small></span></div>
-              <div><span className="role-icon gourmet">G</span><span><b>グルメ媒体</b><small>Gemini · Google Search</small></span></div>
+              <div><span className="role-icon gourmet">G</span><span><b>グルメ媒体</b><small>Gemini · ページ本文と検索</small></span></div>
               <div><span className="role-icon social">X</span><span><b>SNS・Xの声</b><small>Grok · X Search</small></span></div>
             </div>
             <button className="primary-button" disabled={!!working || !!activeRun || discoveringRun || (!selectedSiteIds.length && !customSites.length)}>{working === "analysis" ? <><i className="spinner" />専門AIが調査しています</> : discoveringRun ? "実行中の解析を確認しています" : activeRun ? "進行中の解析を確認してください" : "選択したサイトを分析　↗"}</button>
@@ -622,7 +644,7 @@ export default function App() {
             {selected.agents.some((agent) => agent.status !== "done") && <div className="coverage-notice"><b>取得範囲が限られた調査があります</b><p>{selected.agents.filter((agent) => agent.status !== "done").map((agent) => agentTitle(agent.id)).join("・")}の専門調査は一部取得または取得失敗となりました。詳細な取得状況は「専門AIの調査」に表示します。このレポートの判断は、確認できた情報の範囲に限られます。</p></div>}
             <nav className="tabs">{([["report","統合レポート"],["agents","専門AIの調査"],["critique","反証・確認事項"]] as [Tab,string][]).map(([id,label]) => <button key={id} onClick={() => setTab(id)} className={tab === id ? "current" : ""}>{label}</button>)}</nav>
             {tab === "report" && <article className="panel report-panel"><IntegratedReport text={selected.report}/><details className="sources-block"><summary>統合レポートの参照URLを見る</summary><p className="muted small">各主張の根拠と確認範囲は本文に記載しています。URLがあるだけで、ページ全文の取得や事実の正しさを保証するものではありません。</p><SourceLinks sources={selected.reportSources}/></details></article>}
-            {tab === "agents" && <div className="agent-stack">{selected.agents.map((agent) => <article className="panel agent-panel" key={agent.id}><header><div className={`role-icon ${agent.id === "market" ? "market" : agent.id === "gourmet" ? "gourmet" : "social"}`}>{agent.id.startsWith("social") ? "X" : agent.id[0].toUpperCase()}</div><div><b>{agentTitle(agent.id)}</b><small>{agent.provider}</small></div><span className={`agent-state ${agent.status}`}>{agent.status === "done" ? "応答取得済み" : agent.status === "partial" ? "一部取得" : "取得失敗"}</span></header><SpecialistResearch text={agent.text} agentId={agent.id} reportText={selected.report} error={agent.error}/><details className="sources-block"><summary>担当AIが検索・参照したURL</summary><p className="muted small">検索候補や閲覧できなかったページも含まれます。採用した根拠は調査本文を確認してください。</p><SourceLinks sources={agent.sources}/></details></article>)}</div>}
+            {tab === "agents" && <div className="agent-stack">{selected.agents.map((agent) => <article className="panel agent-panel" key={agent.id}><header><div className={`role-icon ${agent.id === "market" ? "market" : agent.id === "gourmet" ? "gourmet" : "social"}`}>{agent.id.startsWith("social") ? "X" : agent.id[0].toUpperCase()}</div><div><b>{agentTitle(agent.id)}</b><small>{agent.provider}</small></div><span className={`agent-state ${agent.status}`}>{agent.status === "done" ? "応答取得済み" : agent.status === "partial" ? "一部取得" : "取得失敗"}</span></header><DirectPageStatus pages={agent.directPages}/><SpecialistResearch text={agent.text} agentId={agent.id} reportText={selected.report} error={agent.error}/><details className="sources-block"><summary>担当AIが検索・参照したURL</summary><p className="muted small">検索候補や閲覧できなかったページも含まれます。採用した根拠は調査本文を確認してください。</p><SourceLinks sources={agent.sources}/></details></article>)}</div>}
             {tab === "critique" && <article className="panel report-panel"><div className="panel-kicker">FACT CHECK</div><h3>統合担当による反証・根拠の照合</h3><p className="muted small">専門AIの調査を照合し、採用・修正・保留した判断と理由を示します。同じ資料の転載や同じモデルによる再確認は、独立した証拠として数えません。</p><TextPanel text={selected.critique}/><div className="sources-block"><b>検証時の参照URL</b><SourceLinks sources={selected.critiqueSources}/></div></article>}
             <section className="panel qa-panel"><div className="qa-heading"><div><span className="panel-kicker">REPORT FOLLOW-UP</span><h3>レポートに質問する</h3></div><span>この調査結果を引き継いで回答</span></div>
               <div className="conversation">{selected.followups.map((item,index) => <div className="qa-pair" key={`${item.at}-${index}`}><div className="question-bubble">{item.question}</div><div className="answer-bubble"><TextPanel text={item.answer}/><SourceLinks sources={item.sources}/></div></div>)}</div>
