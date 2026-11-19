@@ -106,6 +106,7 @@ Deno.test("follow-up answers retain the saved pre-research focus", async () => {
   };
   try {
     await answerQuestion(db, "owner", { reportId: "report", question: "まず何をすべき？" }, costDb());
+    assert.equal(payload.model, "gpt-6.1-terra");
     assert.ok(payload.input.includes(JSON.stringify(focus)));
     assert.ok(payload.input.includes("まず何をすべき？"));
   } finally {

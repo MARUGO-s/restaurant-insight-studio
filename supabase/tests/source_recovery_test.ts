@@ -256,8 +256,10 @@ Deno.test("new synthesis journals its completed original before validating and r
   globalThis.fetch = async (_target, init) => {
     calls++;
     assert.equal(init?.method, "POST");
-    assert.equal(JSON.parse(String(init?.body)).background, true);
-    return Response.json({ id: "resp_new", status: "completed", model: "gpt-6.1-terra", output_text: freshText,
+    const payload = JSON.parse(String(init?.body));
+    assert.equal(payload.background, true);
+    assert.equal(payload.model, "gpt-6.2-astra");
+    return Response.json({ id: "resp_new", status: "completed", model: "gpt-6.2-astra", output_text: freshText,
       usage: { input_tokens: 10, output_tokens: 20 },
     });
   };

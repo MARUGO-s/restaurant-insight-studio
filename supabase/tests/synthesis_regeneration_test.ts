@@ -40,11 +40,14 @@ Deno.test("executor uses only server generation and sends one metered synthesis 
   const toolUrl = "https://observed.test/source";
   globalThis.fetch = async (_url, init) => {
     sent++; const payload = JSON.parse(String(init?.body));
+    assert.equal(payload.model, "gpt-6.2-astra");
+    assert.equal(payload.stream, true);
     assert.deepEqual(payload.include, ["web_search_call.action.sources"]);
     assert.ok(payload.input.includes("claimReviews[2].evidenceQuote: exact quotation mismatch"));
     assert.equal(d.costs.at(-1).request_metadata.regeneration_id, generation);
     assert.equal(d.costs.at(-1).request_status, "unknown");
-    const response = { id: "resp-new", status: "completed", output_text: JSON.stringify({ critique: "確認の制約を残す", report: withIntegrityReviews(qualityReport(), agents as any) }),
+    assert.equal(d.costs.at(-1).model, "gpt-6.2-astra");
+    const response = { id: "resp-new", model: "gpt-6.2-astra", status: "completed", output_text: JSON.stringify({ critique: "確認の制約を残す", report: withIntegrityReviews(qualityReport(), agents as any) }),
       output: [{ type: "web_search_call", action: { sources: [{ url: toolUrl }] } }], usage: { input_tokens: 10, output_tokens: 20 } };
     return new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
   };
@@ -54,6 +57,8 @@ Deno.test("executor uses only server generation and sends one metered synthesis 
     assert.equal(d.saved.synthesisDraft.requiredReportVersion, 3);
     assert.ok(d.saved.synthesisDraft.toolSources.includes(toolUrl));
     assert.equal(d.costs.length, 2);
+    assert.equal(d.costs.at(-1).model, "gpt-6.2-astra");
+    assert.ok(Math.abs(d.costs.at(-1).list_price_usd - 0.01088) < 1e-10);
     const again = await execute(d, { ...d.saved, regenerationId: generation, requiredReportVersion: 3 });
     assert.equal(again.p_error, null); assert.equal(sent, 1); assert.equal(d.costs.length, 2);
     const forged = database([completed()]);

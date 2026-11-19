@@ -9,7 +9,7 @@
 - OpenAI、Gemini、xAIのAPIキーはSupabase Dashboardの **Edge Functions → Secrets** に`OPENAI_API_KEY`、`GEMINI_API_KEY`、`XAI_API_KEY`として登録します。APIキー用のDBテーブルは作りません。関数実行環境だけが値を読み、ブラウザーやレポート行には返しません。
 - 1ユーザーあたりの分析開始は1時間10回までに制限し、実行状態を`restaurant_insight_runs`へ記録します。
 - `restaurant_insight_cost_events`には各プロバイダーAPI応答が返す利用量を呼び出し単位で保存します。画面ではモデルごとの公式公開単価とツール利用料から標準料金ベースのUSD積算を表示します。各社の無料枠・契約割引・税・為替をAPI応答から特定できないため、請求書の確定額とは区別します。利用量やモデル単価を取得できない呼び出しは算定不能と表示します。
-- OpenAIの分析、反証、統合、質問回答には`gpt-6.1-terra`を使います。Geminiは`gemini-3.8-flash`、xAIは`grok-4.7`を既定値とし、呼び出しで実際に使ったモデルIDと料金スナップショットも保存します。
+- 市場・競合調査とレポートへの質問回答には`gpt-6.1-terra`、反証・総合レポートの執筆には`gpt-6.2-astra`を使います。Geminiは`gemini-3.8-flash`、xAIは`grok-4.7`を既定値とし、呼び出しで実際に使ったモデルIDと料金スナップショットも保存します。
 
 ## Local development
 

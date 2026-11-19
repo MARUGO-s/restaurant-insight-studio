@@ -172,3 +172,26 @@ Deno.test("provider, parse and early EOF failures have distinct diagnostics with
     });
   }
 });
+
+Deno.test("Astra and historical Terra cost snapshots use their own token, cache, and Web Search rates", () => {
+  const usage = { input_tokens: 1500, input_tokens_details: { cached_tokens: 500, cache_write_tokens: 250 },
+    output_tokens: 90, web_search: { num_requests: 2 } };
+  const astra = readUsage("OpenAI", "gpt-6.2-astra", { usage });
+  assert.equal(astra.measurementStatus, "complete");
+  assert.deepEqual(astra.rates, { input_usd_per_million: 8, cached_input_usd_per_million: 0.4, cache_write_usd_per_million: 10,
+    output_usd_per_million: 40, web_search_usd_per_call: 0.01 });
+  assert.ok(astra.cost !== null && Math.abs(astra.cost - 0.0323) < 1e-10);
+
+  const terra = readUsage("OpenAI", "gpt-6.1-terra", { usage });
+  assert.equal(terra.measurementStatus, "complete");
+  assert.deepEqual(terra.rates, { input_usd_per_million: 1, cached_input_usd_per_million: 0.05, cache_write_usd_per_million: 1.25,
+    output_usd_per_million: 5, web_search_usd_per_call: 0.01 });
+  assert.ok(terra.cost !== null && Math.abs(terra.cost - 0.0215375) < 1e-10);
+
+  const boundary = readUsage("OpenAI", "gpt-6.2-astra", { usage: { ...usage, input_tokens: 272_000 } });
+  assert.deepEqual(boundary.rates, astra.rates);
+  const long = readUsage("OpenAI", "gpt-6.2-astra", { usage: { ...usage, input_tokens: 272_001 } });
+  assert.deepEqual(long.rates, { input_usd_per_million: 16, cached_input_usd_per_million: 0.8, cache_write_usd_per_million: 20,
+    output_usd_per_million: 60, web_search_usd_per_call: 0.01 });
+  assert.ok(long.cost !== null && Math.abs(long.cost - 4.370816) < 1e-10);
+});

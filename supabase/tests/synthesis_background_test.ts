@@ -6,7 +6,8 @@ import { withIntegrityReviews } from "./report_integrity_fixture.ts";
 const run = { id: "test-run", user_id: "test-owner", input: qualityInput };
 const jobId = "test-synthesis-job";
 const responseId = "resp_background_fixture";
-const model = "gpt-6.1-terra";
+const synthesisModel = "gpt-6.2-astra";
+const historicalModel = "gpt-6.1-terra";
 const toolSource = "https://observed.test/source";
 const market = { id: "market", provider: "OpenAI", status: "done", text: "市場の調査記録", sources: [evidenceUrl] };
 const gourmet = { id: "gourmet", provider: "Google Gemini", status: "done", text: "媒体の調査記録", sources: [evidenceUrl], menuInventory: [] };
@@ -25,7 +26,7 @@ const historicalCost = {
   attempt_number: 8,
   operation: "fact_check_synthesis",
   provider: "OpenAI",
-  model,
+  model: historicalModel,
   request_status: "unknown",
   request_metadata: { provider_response_id: "resp_old_foreground", response_status: "in_progress" },
 };
@@ -80,6 +81,9 @@ function fakeDatabase(initial: Record<string, any>[] = []) {
     execute: (attempts: number, output: Record<string, any> = saved) => executeJob(db, {
       id: jobId, job_key: "synthesis", attempts, max_attempts: 11, lease_token: "test-lease", output: structuredClone(output),
     }, run),
+    executeMarket: () => executeJob(db, {
+      id: "test-market-job", job_key: "market", attempts: 1, max_attempts: 3, lease_token: "test-lease", output: {},
+    }, run),
   };
 }
 
@@ -96,10 +100,10 @@ async function withProvider(mock: typeof fetch, action: () => Promise<void>) {
   }
 }
 
-function providerResponse(status: "queued" | "in_progress" | "completed") {
+function providerResponse(status: "queued" | "in_progress" | "completed", model: string | null = synthesisModel) {
   const report = withIntegrityReviews(qualityReport(), [market, gourmet, social]);
   return Response.json({
-    id: responseId, model, status,
+    id: responseId, ...(model ? { model } : {}), status,
     ...(status === "completed" ? {
       output: [
         { type: "web_search_call", status: "completed", action: { sources: [{ url: toolSource }] } },
@@ -122,11 +126,13 @@ Deno.test("ordinary synthesis submits once and polls the same background respons
     if (method === "POST") {
       assert.equal(url.pathname, "/v1/responses");
       const payload = JSON.parse(String(init?.body));
+      assert.equal(payload.model, synthesisModel);
       assert.equal(payload.background, true);
       assert.equal(payload.store, true);
       assert.notEqual(payload.stream, true);
       assert.deepEqual(payload.include, ["web_search_call.action.sources"]);
       assert.equal(d.costs.length, 2);
+      assert.equal(d.costs[1].model, synthesisModel);
       assert.equal(d.costs[1].request_status, "unknown");
       assert.equal(d.costs[1].request_metadata.synthesis_background, true);
       return providerResponse("queued");
@@ -162,11 +168,13 @@ Deno.test("ordinary synthesis submits once and polls the same background respons
     assert.deepEqual(methods, ["POST", "GET", "GET", "GET"]);
     assert.equal(d.costs.length, 2);
     assert.deepEqual(d.costs[0], historicalCost);
+    assert.equal(d.costs[1].model, synthesisModel);
     assert.equal(d.costs[1].request_status, "succeeded");
     assert.equal(d.costs[1].request_metadata.response_status, "completed");
     assert.equal(d.costs[1].request_metadata.provider_response_id, responseId);
     assert.equal(d.costs[1].attempt_number, 9);
-    assert.ok(d.costs[1].list_price_usd > 0);
+    assert.equal(d.costs[1].measurement_status, "complete");
+    assert.ok(Math.abs(d.costs[1].list_price_usd - 0.0188) < 1e-10);
     const finish = d.calls.find(call => call.name === "restaurant_insight_finish_job");
     assert.ok(finish);
     assert.equal(finish.args.p_error, null);
@@ -201,7 +209,7 @@ Deno.test("ambiguous initial submission keeps the reservation and blocks a secon
   });
 });
 
-Deno.test("completed billing record recovers a missing checkpoint without a new generation", async () => {
+Deno.test("completed Terra billing record recovers a missing checkpoint without a new generation", async () => {
   const completedCost = {
     ...historicalCost,
     id: "completed-background-attempt",
@@ -214,12 +222,14 @@ Deno.test("completed billing record recovers a missing checkpoint without a new 
   await withProvider(async (target, init) => {
     methods.push(init?.method ?? "GET");
     assert.equal(new URL(String(target)).pathname, "/v1/responses/" + responseId);
-    return providerResponse("completed");
+    return providerResponse("completed", null);
   }, async () => {
     await d.execute(10);
     assert.deepEqual(methods, ["GET"]);
     assert.equal(d.costs.length, 1);
     assert.equal(d.costs[0].id, completedCost.id);
+    assert.equal(d.costs[0].model, historicalModel);
+    assert.ok(Math.abs(d.costs[0].list_price_usd - 0.0111) < 1e-10);
     assert.equal(d.costs[0].attempt_number, 9);
     assert.equal(d.saved.synthesisDraft.costId, completedCost.id);
     assert.ok(d.saved.report_row);
@@ -231,5 +241,28 @@ Deno.test("completed billing record recovers a missing checkpoint without a new 
     assert.ok(finish);
     assert.equal(finish.args.p_error, null);
     assert.equal(JSON.parse(finish.args.p_output.report_row.report).qualityGate.version, 3);
+  });
+});
+
+Deno.test("market research keeps using Terra and its own cost operation", async () => {
+  const d = fakeDatabase();
+  await withProvider(async (_target, init) => {
+    const payload = JSON.parse(String(init?.body));
+    assert.equal(payload.model, historicalModel);
+    assert.equal(payload.stream, true);
+    assert.deepEqual(payload.tools, [{ type: "web_search" }]);
+    const response = { id: "resp_market", model: historicalModel, status: "completed", output_text: "市場の調査結果",
+      usage: { input_tokens: 100, output_tokens: 200 } };
+    return new Response(`data: ${JSON.stringify({ type: "response.completed", response })}\n\n`);
+  }, async () => {
+    await d.executeMarket();
+    assert.equal(d.costs.length, 1);
+    assert.equal(d.costs[0].operation, "market_research");
+    assert.equal(d.costs[0].model, historicalModel);
+    assert.equal(d.costs[0].request_status, "succeeded");
+    const finish = d.calls.find(call => call.name === "restaurant_insight_finish_job");
+    assert.ok(finish);
+    assert.equal(finish.args.p_error, null);
+    assert.equal(finish.args.p_output.provider, "OpenAI · GPT-6.1 Terra");
   });
 });

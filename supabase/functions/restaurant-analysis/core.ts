@@ -197,11 +197,20 @@ function readUsage(provider: string, model: string, data: any, pricingDate = pri
 
   const normalized = { input_tokens: inputTokens, cached_input_tokens: cachedInputTokens, cache_write_tokens: cacheWriteTokens, output_tokens: outputTokens, web_search_calls: webSearchCalls, google_search_queries: googleSearchQueries, x_posts_fetched: xPostsFetched, x_users_fetched: xUsersFetched };
   const id = model.toLowerCase();
+  const isAstra = id.startsWith("gpt-6.2-astra");
   let rates: Record<string, number> = {}, cost: number | null = null;
-  if (provider === "OpenAI" && id.startsWith("gpt-6.1-terra")) {
+  if (provider === "OpenAI" && (isAstra || id.startsWith("gpt-6.1-terra"))) {
     const longContext = (inputTokens ?? 0) > 272_000;
-    const factor = longContext ? 2 : 1;
-    rates = { input_usd_per_million: factor, cached_input_usd_per_million: 0.05 * factor, cache_write_usd_per_million: 1.25 * factor, output_usd_per_million: longContext ? 7.5 : 5, web_search_usd_per_call: 0.01 };
+    const inputFactor = longContext ? 2 : 1;
+    const baseInputRate = isAstra ? 8 : 1;
+    const inputRate = baseInputRate * inputFactor;
+    rates = {
+      input_usd_per_million: inputRate,
+      cached_input_usd_per_million: inputRate * 0.05,
+      cache_write_usd_per_million: inputRate * 1.25,
+      output_usd_per_million: (isAstra ? 40 : 5) * (longContext ? 1.5 : 1),
+      web_search_usd_per_call: 0.01,
+    };
   } else if (provider === "Google Gemini" && id.startsWith("gemini-3.8-flash")) {
     const postIncrease = pricingDate >= "2027-01-01";
     rates = { input_usd_per_million: postIncrease ? 1.5 : 0.75, cached_input_usd_per_million: postIncrease ? 0.15 : 0.075, output_usd_per_million: postIncrease ? 7.5 : 3.75, google_search_usd_per_query: 0.014, google_search_included_monthly: 5000 };
@@ -830,7 +839,7 @@ async function finalizeSynthesis(input: any, agents: Agent[], integrated: Synthe
   } };
 }
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
-const SYNTHESIS_MODEL = "gpt-6.1-terra";
+const SYNTHESIS_MODEL = "gpt-6.2-astra";
 const SYNTHESIS_SOURCES = "web_search_call.action.sources";
 
 function synthesisPayload(input: any, agents: Agent[], repairFeedback: string) {
@@ -870,10 +879,11 @@ async function backgroundSynthesis(input: any, agents: Agent[], meter: MeterCont
   const key = env("OPENAI_API_KEY");
   if (!key) throw new NonBillableSynthesisError("OpenAI APIキーが未設定です。", { backgroundSynthesisPending: false });
   const costMeter = submitting ? meter : { ...meter, attempt: prior.attempt_number };
+  const requestModel = submitting ? SYNTHESIS_MODEL : prior.model;
   const metadata = { synthesis_background: true };
   const body = submitting ? JSON.stringify({ ...synthesisPayload(input, agents, repairFeedback), background: true, store: true }) : undefined;
   if (!pending) await meter.checkpoint?.({ backgroundSynthesisPending: true });
-  if (submitting) await saveCost(costMeter, costId, "OpenAI", SYNTHESIS_MODEL, "unknown", {}, { ...metadata, request_phase: "sent" }, true);
+  if (submitting) await saveCost(costMeter, costId, "OpenAI", requestModel, "unknown", {}, { ...metadata, request_phase: "sent" }, true);
 
   const url = new URL(submitting ? OPENAI_RESPONSES_URL : `${OPENAI_RESPONSES_URL}/${responseId}`);
   if (!submitting) url.searchParams.append("include[]", SYNTHESIS_SOURCES);
@@ -891,7 +901,7 @@ async function backgroundSynthesis(input: any, agents: Agent[], meter: MeterCont
   if (!response.ok) {
     if (submitting) {
       if (![400, 401, 403, 404, 422, 429].includes(response.status)) throw uncertain();
-      await saveCost(costMeter, costId, "OpenAI", SYNTHESIS_MODEL, "failed", {}, { ...metadata, request_phase: "rejected", http_status: response.status });
+      await saveCost(costMeter, costId, "OpenAI", requestModel, "failed", {}, { ...metadata, request_phase: "rejected", http_status: response.status });
       throw new NonBillableSynthesisError(`OpenAIが統合リクエストを受け付けませんでした（HTTP ${response.status}）。`, { backgroundSynthesisPending: false });
     }
     if (response.status === 429 || response.status >= 500) return null;
@@ -906,7 +916,7 @@ async function backgroundSynthesis(input: any, agents: Agent[], meter: MeterCont
     if (submitting) throw uncertain();
     return null;
   }
-  await saveCost(costMeter, costId, "OpenAI", data.model ?? SYNTHESIS_MODEL, active ? "unknown" : complete ? "succeeded" : "failed", data, {
+  await saveCost(costMeter, costId, "OpenAI", data.model ?? requestModel, active ? "unknown" : complete ? "succeeded" : "failed", data, {
     ...metadata, request_phase: active ? "background" : "finished", response_status: data.status,
     provider_response_id: data.id, http_status: response.status,
   });
