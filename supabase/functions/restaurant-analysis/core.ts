@@ -829,13 +829,108 @@ async function finalizeSynthesis(input: any, agents: Agent[], integrated: Synthe
     report_sources: sourceUrls("", [...citedSources.filter(url => knownSources.has(canonicalSource(url))), ...productInventory.map(item => item.source).filter(url => !reviewedInventory || knownSources.has(canonicalSource(url)))]),
   } };
 }
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const SYNTHESIS_MODEL = "gpt-6.1-terra";
+const SYNTHESIS_SOURCES = "web_search_call.action.sources";
+
+function synthesisPayload(input: any, agents: Agent[], repairFeedback: string) {
+  return { model: SYNTHESIS_MODEL, reasoning: { effort: "medium" }, input: buildSynthesisPrompt(input, agents, repairFeedback),
+    tools: [{ type: "web_search" }], include: [SYNTHESIS_SOURCES], max_output_tokens: 24000 };
+}
+
+async function backgroundSynthesis(input: any, agents: Agent[], meter: MeterContext, repairFeedback: string, savedOutput: any): Promise<SynthesisDraft | null> {
+  const { data: rows, error } = await meter.costDb.from("restaurant_insight_cost_events")
+    .select("id,attempt_number,provider,model,request_status,request_metadata")
+    .eq("user_id", meter.userId).eq("run_id", meter.runId).eq("job_id", meter.jobId)
+    .eq("operation", meter.operation).eq("provider", "OpenAI").eq("request_metadata->>synthesis_background", "true")
+    .order("created_at", { ascending: false }).limit(1);
+  if (error) throw new Error("保存済みの統合応答を確認できませんでした。");
+  const prior = rows?.[0];
+  const pending = savedOutput.backgroundSynthesisPending === true;
+  const priorStatus = prior?.request_metadata?.response_status;
+  const terminalFailure = ["failed", "cancelled", "incomplete"].includes(priorStatus);
+  const submitting = !prior || (prior.attempt_number !== meter.attempt && (terminalFailure || prior.request_metadata?.request_phase === "rejected"));
+  if (submitting) {
+    const saved = await savedSynthesis(meter, savedOutput);
+    if (saved) return saved;
+  }
+
+  const responseId = submitting ? null : prior.request_metadata?.provider_response_id;
+  const costId = submitting ? crypto.randomUUID() : prior.id;
+  const draft = synthesisDraft(savedOutput);
+  if (!submitting && priorStatus === "completed" && prior.request_status === "succeeded"
+    && draft && draft.costId === costId && draft.responseId === responseId) {
+    if (pending) await meter.checkpoint?.({ backgroundSynthesisPending: false });
+    return draft;
+  }
+
+  // The reservation precedes I/O. If acceptance was ambiguous, another POST could buy a duplicate report.
+  const uncertain = () => new NonBillableSynthesisError("OpenAIの統合受付を確認できませんでした。重複生成を防ぐため自動で再送しません。", { backgroundSynthesisPending: false });
+  if (!submitting && (typeof responseId !== "string" || !/^resp_[a-zA-Z0-9_-]{1,180}$/.test(responseId))) throw uncertain();
+  const key = env("OPENAI_API_KEY");
+  if (!key) throw new NonBillableSynthesisError("OpenAI APIキーが未設定です。", { backgroundSynthesisPending: false });
+  const costMeter = submitting ? meter : { ...meter, attempt: prior.attempt_number };
+  const metadata = { synthesis_background: true };
+  const body = submitting ? JSON.stringify({ ...synthesisPayload(input, agents, repairFeedback), background: true, store: true }) : undefined;
+  if (!pending) await meter.checkpoint?.({ backgroundSynthesisPending: true });
+  if (submitting) await saveCost(costMeter, costId, "OpenAI", SYNTHESIS_MODEL, "unknown", {}, { ...metadata, request_phase: "sent" }, true);
+
+  const url = new URL(submitting ? OPENAI_RESPONSES_URL : `${OPENAI_RESPONSES_URL}/${responseId}`);
+  if (!submitting) url.searchParams.append("include[]", SYNTHESIS_SOURCES);
+  let response: Response, data: any;
+  try {
+    response = await fetch(url, { method: submitting ? "POST" : "GET",
+      headers: { Authorization: `Bearer ${key}`, ...(submitting ? { "Content-Type": "application/json" } : {}) },
+      body, signal: AbortSignal.timeout(15_000) });
+    if (response.ok) data = await response.json();
+  } catch {
+    if (submitting) throw uncertain();
+    return null;
+  }
+
+  if (!response.ok) {
+    if (submitting) {
+      if (![400, 401, 403, 404, 422, 429].includes(response.status)) throw uncertain();
+      await saveCost(costMeter, costId, "OpenAI", SYNTHESIS_MODEL, "failed", {}, { ...metadata, request_phase: "rejected", http_status: response.status });
+      throw new NonBillableSynthesisError(`OpenAIが統合リクエストを受け付けませんでした（HTTP ${response.status}）。`, { backgroundSynthesisPending: false });
+    }
+    if (response.status === 429 || response.status >= 500) return null;
+    throw new NonBillableSynthesisError(`作成中の統合応答を確認できませんでした（HTTP ${response.status}）。`, { backgroundSynthesisPending: false });
+  }
+
+  const active = ["queued", "in_progress"].includes(data?.status);
+  const complete = data?.status === "completed";
+  const failed = ["failed", "cancelled", "incomplete"].includes(data?.status);
+  if (typeof data?.id !== "string" || !/^resp_[a-zA-Z0-9_-]{1,180}$/.test(data.id)
+    || (!submitting && data.id !== responseId) || (!active && !complete && !failed)) {
+    if (submitting) throw uncertain();
+    return null;
+  }
+  await saveCost(costMeter, costId, "OpenAI", data.model ?? SYNTHESIS_MODEL, active ? "unknown" : complete ? "succeeded" : "failed", data, {
+    ...metadata, request_phase: active ? "background" : "finished", response_status: data.status,
+    provider_response_id: data.id, http_status: response.status,
+  });
+  const text = responseText(data), toolSources = collectUrls(data);
+  if (active) {
+    await meter.checkpoint?.({ backgroundSynthesisPending: true, requiredReportVersion: 3,
+      ...(text ? { text, sources: sourceUrls(text, toolSources), toolSources, costId, provider: "OpenAI", responseId: data.id, responseStatus: data.status, partial: true } : {}) });
+    return null;
+  }
+  await meter.checkpoint?.({ backgroundSynthesisPending: false });
+  if (failed) throw new Error(`OpenAIの統合応答が完了しませんでした（${data.status}）。`);
+  const completed = synthesisDraft({ text, toolSources, costId, responseId: data.id, responseStatus: data.status, requiredReportVersion: 3 });
+  if (!completed) throw new NonBillableSynthesisError("OpenAIの完了済み統合応答に本文がありませんでした。", { backgroundSynthesisPending: false });
+  return completed;
+}
+
 async function synthesize(input: any, agents: Agent[], meter: MeterContext, repairFeedback = "", savedOutput: any = {}) {
   requireResearchProviders(agents);
-  let integrated = await savedSynthesis(meter, savedOutput);
+  const useBackground = meter.jobId && !meter.researchMetadata?.regeneration_id;
+  let integrated = useBackground ? await backgroundSynthesis(input, agents, meter, repairFeedback, savedOutput) : await savedSynthesis(meter, savedOutput);
+  if (useBackground && !integrated) return null;
   if (!integrated) {
-    const result = await requestJson("https://api.openai.com/v1/responses", env("OPENAI_API_KEY"), {
-      model: "gpt-6.1-terra", reasoning: { effort: "medium" }, input: buildSynthesisPrompt(input, agents, repairFeedback),
-      tools: [{ type: "web_search" }], include: ["web_search_call.action.sources"], max_output_tokens: 24000, stream: true,
+    const result = await requestJson(OPENAI_RESPONSES_URL, env("OPENAI_API_KEY"), {
+      ...synthesisPayload(input, agents, repairFeedback), stream: true,
     }, false, { ...meter, checkpoint: meter.checkpoint
       ? value => meter.checkpoint!({ ...value, requiredReportVersion: 3 }) : undefined }, 300_000);
     // This version belongs to server provenance, never to generated JSON.
@@ -884,7 +979,11 @@ async function getRunStatus(db: any, userId: string, runId: string) {
   const canRegenerateSynthesis = run.status === "failed" && synthesis?.status === "failed"
     && synthesis.output?.sourceRecovery?.status === "needs_review" && typeof revision === "string" && !!revision.trim()
     && jobs.filter((j: any) => j.job_key !== "synthesis" && j.status === "done").length === 4;
-  const progress = { canRegenerateSynthesis: false, synthesisRevision: null as string | null, startedAt: run.started_at, researchFocus: normalizeResearchFocus(run.input?.researchFocus), jobs: (jobs ?? []).map((j: any) => ({ key: j.job_key, label: JOB_LABELS[j.job_key], status: j.status, attempts: j.attempts, maxAttempts: j.max_attempts, error: j.error_message ?? undefined })) };
+  const progress = { canRegenerateSynthesis: false, synthesisRevision: null as string | null, startedAt: run.started_at, researchFocus: normalizeResearchFocus(run.input?.researchFocus), jobs: (jobs ?? []).map((j: any) => ({
+    key: j.job_key, label: JOB_LABELS[j.job_key],
+    status: j.job_key === "synthesis" && j.status === "pending" && j.output?.backgroundSynthesisPending === true ? "running" : j.status,
+    attempts: j.attempts, maxAttempts: j.max_attempts, error: j.error_message ?? undefined,
+  })) };
   const { data: report, error: reportError } = await db.from("restaurant_insight_reports").select("*").eq("run_id", runId).eq("user_id", userId).maybeSingle();
   if (reportError) throw reportError;
   if (report?.deleted_at) return { ...progress, status: "trashed", progressStage: "done" };
@@ -902,7 +1001,10 @@ async function executeJob(db: any, job: any, run: any) {
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(job.output.regenerationId) ? job.output.regenerationId : undefined;
   const meter = (operation: string): MeterContext => ({ costDb: db, userId: run.user_id, runId: run.id, jobId: job.id, attempt: job.attempts, operation,
     ...(regenerationId ? { researchMetadata: { regeneration_id: regenerationId } } : {}),
-    checkpoint: async (value) => { await rpc(db, "restaurant_insight_checkpoint_job", { p_job_id: job.id, p_lease_token: job.lease_token, p_output: value }); },
+    checkpoint: async (value) => {
+      const accepted = await rpc(db, "restaurant_insight_checkpoint_job", { p_job_id: job.id, p_lease_token: job.lease_token, p_output: value });
+      if (accepted === false) throw new Error("この工程の実行枠が終了しました。");
+    },
   });
   try {
     const prompts = buildResearchPrompts(run.input);
@@ -926,6 +1028,11 @@ async function executeJob(db: any, job: any, run: any) {
       const social: Agent = { id: "social", provider: "xAI Grok", status: "done", researchUpdates: updates,
         text: `調査の更新履歴\n${updates.map((value, index) => updateSummary(value, index === 0 ? "最近の体験" : "過去の体験")).join("\n")}\n保存済み記録と今回の差分を合わせて検討する。古い体験を今回取得した声や現在の運用と断定しない。前回の反例を落とさず、更新情報と矛盾すれば時点・制約を示す。\n## 最近の体験\n${recent.text}\n\n## 過去の体験・発信との比較\n${history.text}`, sources: [...new Set([...recent.sources, ...history.sources])] };
       output = await synthesize(run.input, [get("market"), get("gourmet"), social], meter("fact_check_synthesis"), job.output?.regenerationFeedback ?? job.error_message ?? "", job.output);
+      if (output === null) {
+        const deferred = await rpc(db, "restaurant_insight_defer_synthesis", { p_job_id: job.id, p_lease_token: job.lease_token });
+        if (deferred === false) throw new Error("次回の統合応答確認を予約できませんでした。");
+        return;
+      }
     } else throw new Error("不明な工程です");
     if (job.job_key.startsWith("social_") && output?.status === "done") {
       output.researchComplete = true;

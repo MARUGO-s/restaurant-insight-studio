@@ -195,9 +195,9 @@ Deno.test("legacy completed drafts retain their original inventory/source contra
   assert.ok(saved.report_row.report_sources.includes("https://legacy.test/menu"));
 });
 
-Deno.test("fresh generations cannot opt out of v3; terminal and draft checkpoints retain the server gate on free retry", async () => {
-  const oldFetch = globalThis.fetch, checkpoints: any[] = [], costs: any[] = [];
-  let calls = 0;
+Deno.test("fresh generations cannot opt out of v3; stored responses retain the gate on free retry", async () => {
+  const oldFetch = globalThis.fetch, oldKey = Deno.env.get("OPENAI_API_KEY"), checkpoints: any[] = [], costs: any[] = [];
+  const methods: string[] = [];
   const db = { from: () => {
     const q: any = { select: () => q, eq: () => q, order: () => q, limit: () => q,
       insert: (row: any) => { costs.push(row); return Promise.resolve({ error: null }); },
@@ -208,20 +208,28 @@ Deno.test("fresh generations cannot opt out of v3; terminal and draft checkpoint
   const meter = { costDb: db, userId: "owner", runId: "run", jobId: "job", operation: "fact_check_synthesis", checkpoint: async (c: any) => { checkpoints.push(c); } };
   // Deliberately old-shaped model output, even claiming an old gate version.
   const report = { ...qualityReport(), qualityGate: { version: 2 }, requiredReportVersion: 2 };
-  globalThis.fetch = async () => { calls++; return new Response(`data: ${JSON.stringify({ type: "response.completed", response: {
-    id: "new-response", status: "completed", output_text: JSON.stringify({ critique: "確認", report }), usage: { input_tokens: 1, output_tokens: 1 },
-  } })}\n\n`, { headers: { "Content-Type": "text/event-stream" } }); };
+  Deno.env.set("OPENAI_API_KEY", "test-only");
+  globalThis.fetch = async (_target, init) => {
+    methods.push(init?.method ?? "GET");
+    return Response.json({ id: "resp_new", status: "completed", output_text: JSON.stringify({ critique: "確認", report }),
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+  };
   try {
     await assert.rejects(() => synthesize(qualityInput, integrityAgents(), meter), NonBillableSynthesisError);
-    assert.equal(calls, 1);
-    const terminal = checkpoints.find(c => c.responseStatus === "completed");
+    assert.deepEqual(methods, ["POST"]);
     const journal = checkpoints.find(c => c.synthesisDraft);
-    assert.equal(terminal.requiredReportVersion, 3); assert.equal(journal.synthesisDraft.requiredReportVersion, 3);
-    for (const saved of [terminal, journal]) {
-      await assert.rejects(() => synthesize(qualityInput, integrityAgents(), meter, "", saved), /claimReviews/);
-      assert.equal(calls, 1); assert.equal(costs.length, 1);
-    }
-  } finally { globalThis.fetch = oldFetch; }
+    assert.equal(journal.synthesisDraft.requiredReportVersion, 3);
+    await assert.rejects(() => synthesize(qualityInput, integrityAgents(), meter, "", journal), /claimReviews/);
+    assert.deepEqual(methods, ["POST"]);
+    // The cost can be committed before the job draft; recovery reads, never creates.
+    await assert.rejects(() => synthesize(qualityInput, integrityAgents(), meter, "", {}), /claimReviews/);
+    assert.deepEqual(methods, ["POST", "GET"]);
+    assert.equal(costs.length, 1);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) Deno.env.delete("OPENAI_API_KEY"); else Deno.env.set("OPENAI_API_KEY", oldKey);
+  }
 });
 
 Deno.test("condition completeness KPI cannot mix checked fields with checked products; legitimate per-product averages remain valid", async () => {

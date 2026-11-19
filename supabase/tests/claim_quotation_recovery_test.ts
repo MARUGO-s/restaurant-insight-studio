@@ -81,7 +81,11 @@ Deno.test("italic finalization and both saved retry paths preserve raw audit wit
       const saved: any[] = [];
       const meter = { costDb: db, userId: "owner", runId: "run", jobId: "job", operation: "fact_check_synthesis",
         checkpoint: async (value: any) => { saved.push(value); } };
-      for (let attempt = 0; attempt < 2; attempt++) verify(await synthesize(qualityInput, agents, meter, "", checkpoint));
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await synthesize(qualityInput, agents, meter, "", checkpoint);
+        assert.ok(result);
+        verify(result);
+      }
       assert.equal(saved[0].synthesisDraft.text, completed.text);
     }
     assert.deepEqual({ agents, completed }, snapshot);
@@ -722,6 +726,7 @@ Deno.test("terminal and completed-draft retries restore or reject with zero fetc
         for (let attempt = 0; attempt < 2; attempt++) {
           if (valid) {
             const result = await retry();
+            assert.ok(result);
             const output = JSON.parse(result.report_row.report);
             assert.equal(output.claimReviews[0].claim, raw); assert.equal(output.qualityGate.version, 3);
             assert.equal(output.qualityGate.claimQuotationRecovery.additionalGenerations, 0);

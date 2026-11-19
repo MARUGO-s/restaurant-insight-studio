@@ -25,7 +25,12 @@ function database(costs: any[] = [cost()]) {
   const filters: any[] = [], rpcCalls: any[] = [], saved: any = {}, writes: any[] = [];
   let finishFailures = 0;
   const db: any = { failFinishOnce() { finishFailures = 1; }, from(table: string) {
-    const q: any = { select() { return q; }, eq(k: string, v: any) { filters.push({ table, k, v }); return q; }, neq() { return q; },
+    const metadataFilters: [string, string][] = [];
+    const q: any = { select() { return q; }, eq(k: string, v: any) {
+      filters.push({ table, k, v });
+      if (k.startsWith("request_metadata->>")) metadataFilters.push([k.split("->>")[1], v]);
+      return q;
+    }, neq() { return q; },
       order() { return q; }, limit() { return q; },
       insert(row: any) { writes.push(row); costs.push(row); return Promise.resolve({ error: null }); },
       update(row: any) { writes.push(row); return q; },
@@ -33,7 +38,7 @@ function database(costs: any[] = [cost()]) {
         const data = table === "restaurant_insight_jobs" ? [
           { job_key: "market", status: "done", output: agents()[0] }, { job_key: "gourmet", status: "done", output: agents()[1] },
           { job_key: "social_recent", status: "done", output: agents()[2] }, { job_key: "social_history", status: "done", output: agents()[2] },
-        ] : costs;
+        ] : costs.filter(cost => metadataFilters.every(([k, v]) => String(cost.request_metadata?.[k]) === v));
         return Promise.resolve({ data, error: null }).then(resolve, reject);
       } };
     return q;
@@ -244,21 +249,30 @@ Deno.test("finish failure resumes the validated completed draft without another 
   });
 });
 Deno.test("new synthesis journals its completed original before validating and repairs in the same single generation", async () => {
-  const d = database([]), checkpoints: any[] = [], oldFetch = globalThis.fetch;
+  const d = database([]), checkpoints: any[] = [], oldFetch = globalThis.fetch, oldKey = Deno.env.get("OPENAI_API_KEY");
   const freshText = draft(withIntegrityReviews(report(), agents())).text;
   let calls = 0;
-  globalThis.fetch = async () => { calls++; return new Response(`data: ${JSON.stringify({ type: "response.completed", response: {
-    id: "resp-new", status: "completed", model: "gpt-6.1-terra", output_text: freshText,
-    usage: { input_tokens: 10, output_tokens: 20 },
-  } })}\n\n`, { headers: { "Content-Type": "text/event-stream" } }); };
+  Deno.env.set("OPENAI_API_KEY", "test-only");
+  globalThis.fetch = async (_target, init) => {
+    calls++;
+    assert.equal(init?.method, "POST");
+    assert.equal(JSON.parse(String(init?.body)).background, true);
+    return Response.json({ id: "resp_new", status: "completed", model: "gpt-6.1-terra", output_text: freshText,
+      usage: { input_tokens: 10, output_tokens: 20 },
+    });
+  };
   try {
     const result = await synthesize(input, agents(), { ...meter(d.db), checkpoint: async value => { checkpoints.push(value); } });
+    assert.ok(result);
     assert.equal(calls, 1); assert.equal(result.sourceRecovery.status, "recovered");
     const beforeValidation = checkpoints.find(c => c.synthesisDraft && !c.report_row);
     assert.equal(beforeValidation.synthesisDraft.text, freshText);
     assert.equal(beforeValidation.synthesisDraft.requiredReportVersion, 3);
     assert.equal(checkpoints.at(-1).synthesisComplete, true);
     assert.equal(d.writes.filter(w => w.id).length, 1);
-    assert.ok(checkpoints.some(c => c.responseStatus === "completed" && c.costId));
-  } finally { globalThis.fetch = oldFetch; }
+    assert.ok(d.writes.some(w => w.request_metadata?.response_status === "completed"));
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) Deno.env.delete("OPENAI_API_KEY"); else Deno.env.set("OPENAI_API_KEY", oldKey);
+  }
 });

@@ -86,6 +86,7 @@ Deno.test("synthesis request and saved report use user's focus even if model rew
   try {
     const output = await synthesize({ ...input, researchFocus: focus }, [{ id: "market", provider: "OpenAI", status: "done", text: "市場", sources: [] }, { id: "gourmet", provider: "Google Gemini", status: "done", text: "調査メモ", sources: [evidenceUrl] }, { id: "social", provider: "xAI Grok", status: "done", text: "X調査", sources: [] }], { costDb: costDb(), userId: "owner", operation: "fact_check_synthesis" });
     assert.ok(payload.input.includes(JSON.stringify(focus)));
+    assert.ok(output);
     assert.equal(JSON.parse(output.report_row.report).researchFocus, focus);
     assert.equal(dbReport(output.report_row).researchFocus, focus);
   } finally { globalThis.fetch = oldFetch; }

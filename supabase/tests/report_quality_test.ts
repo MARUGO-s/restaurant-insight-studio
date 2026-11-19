@@ -56,6 +56,7 @@ Deno.test("saved report holds server inventory, excludes unused candidate URLs, 
   const db = { from: () => ({ insert: async () => ({ error: null }), update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }) }) };
   try {
     const result = await synthesize(qualityInput, [{ id: "market", provider: "OpenAI", status: "done", text: "市場", sources: [] }, { id: "gourmet", provider: "Google Gemini", status: "done", text: "取得ノート", sources: [evidenceUrl, "https://x.com/unrelated/status/1"], menuInventory }, { id: "social", provider: "xAI Grok", status: "done", text: "X調査", sources: [] }], { costDb: db, userId: "owner", operation: "fact_check_synthesis" });
+    assert.ok(result);
     const saved = JSON.parse(result.report_row.report);
     assert.deepEqual(saved.originalProductInventory, menuInventory);
     assert.deepEqual(saved.productInventory, menuInventory.map(m => ({ ...m, reviewStatus: "confirmed", reviewReason: "掲載値を採用。意味一致の保証ではない。" }))); assert.equal(saved.qualityGate.version, 3);
