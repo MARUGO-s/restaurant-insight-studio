@@ -1,11 +1,13 @@
 import { strict as assert } from "node:assert";
 import { buildSynthesisPrompt, executeJob } from "../functions/restaurant-analysis/core.ts";
-import { directPageEvidence, directPageReceipts, loadDirectPages } from "../functions/restaurant-analysis/direct-pages.ts";
+import { directPageEvidence, directPageReceipts, loadDirectPages, verifyTabelogCourseSources } from "../functions/restaurant-analysis/direct-pages.ts";
 
 const officialUrl = "https://www.bistro-cavacava.com/";
 const officialAlias = "https://bistro-cavacava.com/";
 const storeUrl = "https://tabelog.com/tokyo/A1309/A130903/13245351/";
 const courseUrl = storeUrl + "party/";
+const courseDetailUrl = courseUrl + "266358552";
+const courseDetailSelector = "#rstdtl_party_dtl .course-dtl";
 const selectedTabelog = [{ id: "tabelog", name: "食べログ", url: storeUrl }];
 const renderer = { accountId: "abcdef0123456789abcdef0123456789", token: "browser-test-token" };
 const scrapeUrl = `https://api.cloudflare.com/client/v4/accounts/${renderer.accountId}/browser-rendering/scrape?cacheTTL=0`;
@@ -97,7 +99,7 @@ function browserFetch(direct: ReturnType<typeof directFetch>, render: (url: stri
     assert.ok(options?.signal instanceof AbortSignal);
     const request = JSON.parse(String(options?.body));
     assert.ok(direct.calls.includes(request.url), "a known page must be tried directly before opening a browser");
-    const selector = request.url === courseUrl ? ".rstdtl-course-list" : request.url === storeUrl ? ".rstinfo-table tr" : "body";
+    const selector = request.url === courseDetailUrl ? courseDetailSelector : request.url === courseUrl ? ".rstdtl-course-list" : request.url === storeUrl ? ".rstinfo-table tr" : "body";
     const contentSelectors = selector === "body" ? ["body"] : ["body", selector];
     assert.deepEqual(request.elements.map((element: { selector: string }) => element.selector), [...contentSelectors, "title", "h1"]);
     assert.equal(request.waitForSelector.selector, selector);
@@ -200,6 +202,31 @@ Deno.test("manual redirects cannot switch restaurant paths or reach unapproved d
   assert.deepEqual(calls.sort(), [officialUrl, storeUrl, courseUrl].sort());
   assert.equal(pages.length, 3);
   assert.ok(pages.every(page => page.status === "unavailable" && page.reason && !page.text));
+});
+
+Deno.test("course detail browser fallback verifies the same page and captures its visible detail", async () => {
+  const saved = [{ kind: "tabelog-courses" as const, status: "retrieved" as const, url: courseUrl,
+    retrievedAt: "2026-11-20T00:00:00Z", text: displayedCourse }];
+  const detail = "Bコース 全6品\n説明では全8品\nコース料金\t8,800円\n品数\t6品";
+  for (const renderedUrl of [courseDetailUrl, courseUrl + "263184765"]) {
+    const direct = directFetch({ [courseDetailUrl]: () => new Response(null, { status: 403 }) });
+    const browser = browserFetch(direct, () => renderedPage(renderedUrl, courseDetailSelector, [detail], `食べログの案内\n${detail}`));
+    const pages = await verifyTabelogCourseSources([courseDetailUrl], saved, renderer, browser.get);
+    assert.deepEqual(direct.calls, [courseDetailUrl]);
+    assert.deepEqual(browser.calls, [courseDetailUrl]);
+    if (renderedUrl !== courseDetailUrl) {
+      assert.deepEqual(pages, []);
+      continue;
+    }
+    assert.equal(pages.length, 1);
+    const page = pages[0];
+    assert.equal(page.method, "browser");
+    assert.equal(page.requestedUrl, courseDetailUrl);
+    assert.equal(page.url, courseDetailUrl);
+    assert.match(page.text ?? "", /全6品[\s\S]*全8品[\s\S]*8,800円/);
+    assert.doesNotMatch(page.text ?? "", /食べログの案内/);
+    assert.ok(Number.isFinite(Date.parse(page.retrievedAt ?? "")));
+  }
 });
 
 Deno.test("a storefront response failure keeps the course text and a challenge page contributes no evidence", async () => {

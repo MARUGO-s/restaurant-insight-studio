@@ -3,7 +3,7 @@ import { type Baseline, type ResearchPlan, type ReuseInfo, type SocialScope, res
 import { recoverUnreadCoverageLinks } from "./source-recovery.ts";
 import { validateReportIntegrity } from "./report-integrity.ts";
 import { recoverClaimQuotations } from "./claim-quotation-recovery.ts";
-import { type DirectPage, directPageEvidence, directPageReceipts, loadDirectPages } from "./direct-pages.ts";
+import { type DirectPage, directPageEvidence, directPageReceipts, loadDirectPages, verifyTabelogCourseSources } from "./direct-pages.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
@@ -808,6 +808,14 @@ async function finalizeSynthesis(input: any, agents: Agent[], integrated: Synthe
   const critique = parsed.critique;
   let report = parsed.report;
   const observedSources = sourceUrls("", [...agents.flatMap(agentSourceUrls), ...integrated.toolSources]);
+  const observed = new Set(observedSources.map(canonicalSource));
+  const missing = sourceUrls(critique, reportSourceUrls(report)).map(canonicalSource).filter((url) => !observed.has(url));
+  const courseDetailVerification = integrated.requiredReportVersion === 3
+    ? await verifyTabelogCourseSources(missing, agents.find((agent) => agent.id === "gourmet")?.directPages ?? [], {
+      accountId: env("RESTAURANT_BROWSER_ACCOUNT_ID"), token: env("RESTAURANT_BROWSER_API_TOKEN"),
+    })
+    : [];
+  for (const page of courseDetailVerification) observedSources.push(page.url, page.requestedUrl, ...(page.aliases ?? []));
   let reviewedInventory: ReturnType<typeof validateReportIntegrity> | undefined;
   const quotationRecovery = integrated.requiredReportVersion === 3 ? recoverClaimQuotations(report, agents) : undefined;
   if (quotationRecovery) report = quotationRecovery.report;
@@ -840,13 +848,18 @@ async function finalizeSynthesis(input: any, agents: Agent[], integrated: Synthe
   if (quotationRecovery) qualityGate.claimQuotationRecovery = { version: 1,
     status: quotationRecovery.corrections.length ? "recovered" : "unchanged", originalSha256: originalHash,
     corrections: quotationRecovery.corrections, additionalGenerations: 0 };
-  const sourceRecovery = { version: 1, status: corrections ? "recovered" : "unchanged", originalSha256: originalHash,
+  if (courseDetailVerification.length) qualityGate.courseDetailVerification = {
+    pages: courseDetailVerification.map(({ text: _text, ...receipt }) => receipt), additionalGenerations: 0,
+  };
+  const sourceRecovery = { version: 1, status: corrections || courseDetailVerification.length ? "recovered" : "unchanged", originalSha256: originalHash,
     costId: integrated.costId, additionalGenerations: 0, corrections: corrections?.corrections ?? [], checkedAt: qualityGate.checkedAt };
   if (corrections) qualityGate.sourceRecovery = { version: 1, correctedLinks: corrections.corrections.length, contentPreserved: true, additionalGenerations: 0 };
   const productInventory = reviewedInventory?.productInventory ?? agents.flatMap(agent => agent.menuInventory ?? []);
   const citedSources = sourceUrls(critique, reportSourceUrls(report));
   const knownSources = new Set(observedSources.map(canonicalSource));
-  return { synthesisDraft: integrated, synthesisComplete: true, sourceRecovery, report_row: { store_name: storeName, store_url: storeUrl, group_name: groupName, selected_sites: selectedSites,
+  return { synthesisDraft: integrated, synthesisComplete: true,
+    sourceRecovery: { ...sourceRecovery, ...(courseDetailVerification.length ? { courseDetailVerification } : {}) },
+    report_row: { store_name: storeName, store_url: storeUrl, group_name: groupName, selected_sites: selectedSites,
     agents: agents.map((agent) => agent.directPages ? { ...agent, directPages: directPageReceipts(agent.directPages) } : agent),
     critique, critique_sources: sourceUrls(critique).filter(url => knownSources.has(canonicalSource(url))), report: JSON.stringify(reportWithResearchFocus({ ...report, qualityGate, productInventory, ...(reviewedInventory ? { originalProductInventory: reviewedInventory.originalProductInventory } : {}) }, input.researchFocus)),
     report_sources: sourceUrls("", [...citedSources.filter(url => knownSources.has(canonicalSource(url))), ...productInventory.map(item => item.source).filter(url => !reviewedInventory || knownSources.has(canonicalSource(url)))]),

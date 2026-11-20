@@ -21,7 +21,7 @@ function report() {
 const draft = (value = report(), critique = "未確認の運用を断定せず反例を残す。") => ({ version: 1 as const, responseStatus: "completed" as const,
   text: JSON.stringify({ critique, report: value }), toolSources: [parent], costId: "completed-cost", responseId: "resp-completed" });
 const cost = () => ({ id: "completed-cost", provider: "OpenAI", request_status: "succeeded", request_metadata: { response_status: "completed", provider_response_id: "resp-completed" } });
-function database(costs: any[] = [cost()]) {
+function database(costs: any[] = [cost()], specialists: Parameters<typeof finalizeSynthesis>[1] = agents()) {
   const filters: any[] = [], rpcCalls: any[] = [], saved: any = {}, writes: any[] = [];
   let finishFailures = 0;
   const db: any = { failFinishOnce() { finishFailures = 1; }, from(table: string) {
@@ -36,8 +36,8 @@ function database(costs: any[] = [cost()]) {
       update(row: any) { writes.push(row); return q; },
       then(resolve: any, reject: any) {
         const data = table === "restaurant_insight_jobs" ? [
-          { job_key: "market", status: "done", output: agents()[0] }, { job_key: "gourmet", status: "done", output: agents()[1] },
-          { job_key: "social_recent", status: "done", output: agents()[2] }, { job_key: "social_history", status: "done", output: agents()[2] },
+          { job_key: "market", status: "done", output: specialists[0] }, { job_key: "gourmet", status: "done", output: specialists[1] },
+          { job_key: "social_recent", status: "done", output: specialists[2] }, { job_key: "social_history", status: "done", output: specialists[2] },
         ] : costs.filter(cost => metadataFilters.every(([k, v]) => String(cost.request_metadata?.[k]) === v));
         return Promise.resolve({ data, error: null }).then(resolve, reject);
       } };
@@ -147,6 +147,166 @@ Deno.test("completed durable response is recovered and saved with zero provider 
     assert.equal(d.saved.synthesisComplete, true); assert.equal(d.writes.length, 0);
     for (const k of ["user_id", "run_id", "job_id", "operation", "request_metadata->>response_status"]) assert.ok(d.filters.some(f => f.k === k));
   });
+});
+
+const courseList = `${parent}party/`;
+const courseDetails = [`${courseList}263184765`, `${courseList}266358552`];
+const courses = [
+  { name: "Aコース4品", price: "7,000円 (税込)", listedCount: "4品", describedCount: "6品" },
+  { name: "Bコース6品", price: "13,000円 (税込)", listedCount: "6品", describedCount: "8品" },
+];
+function courseAgents() {
+  const [market, gourmet, social] = agents();
+  return [market, { ...gourmet, text: "コース一覧でAコース4品・Bコース6品を確認。", sources: [parent, courseList],
+    directPages: [{ kind: "tabelog-courses" as const, url: courseList, status: "retrieved" as const,
+      title: "コース一覧 | 食べログ", retrievedAt: "2026-11-20T03:00:00Z", text: "コース一覧 Aコース4品 Bコース6品" }],
+    menuInventory: courses.map((course, i) => ({ id: `M${i + 1}`, name: course.name, price: course.price,
+      conditions: `一覧では${course.listedCount}`, site: "食べログ", source: courseList })),
+  }, social];
+}
+function completedCourseDraft(specialists = courseAgents(), details = courseDetails) {
+  const base = JSON.parse(JSON.stringify(qualityReport()).replaceAll(evidenceUrl, courseList));
+  const original = withIntegrityReviews(base, specialists);
+  original.claimReviews[1] = { ...original.claimReviews[1], decision: "supported",
+    reason: "構造化欄に記載された品数と説明の記述に相違がある。", sources: [courseList, ...details] };
+  original.keyFindings[0].sources.push(details[0]);
+  original.detailSections.find((section: any) => section.id === "menu").sources.push(details[1]);
+  original.productReviews = courses.map((course, i) => ({ id: `M${i + 1}`, status: "corrected",
+    reason: "個別ページの説明と構造化欄を両方記録する。", sources: [details[i]],
+    corrected: { name: course.name, price: course.price, conditions: `品数は欄で${course.listedCount}、説明で${course.describedCount}`,
+      site: "食べログ", source: details[i] },
+  }));
+  return { original, completed: { ...draft(original), requiredReportVersion: 3 as const,
+    toolSources: [parent, courseList], responseId: "resp_completed_courses" } };
+}
+function courseHtml(index: number) {
+  const course = courses[index];
+  return `<html><head><title>${course.name} | 食べログ</title></head><body id="rstdtl_party_dtl">
+    <div class="course-dtl"><h3 class="course-dtl__course-title">${course.name}</h3>
+    <div class="course-dtl__desc">コースの説明では${course.describedCount}と記載。</div>
+    <table class="course-dtl__data-table"><tr><th>コース料金</th><td><span class="course-dtl__price-num">${course.price}</span></td></tr>
+    <tr><th>品数</th><td>${course.listedCount}</td></tr></table></div></body></html>`;
+}
+const htmlResponse = (html: string) => new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+function useCourseFetch(fallback?: (index: number) => Response) {
+  const fetchBefore: typeof fetch = globalThis.fetch, calls: { url: string; method: string; redirect?: RequestRedirect }[] = [];
+  const browserSettings = ["RESTAURANT_BROWSER_ACCOUNT_ID", "RESTAURANT_BROWSER_API_TOKEN"].map(key => [key, Deno.env.get(key)] as const);
+  for (const [key] of browserSettings) Deno.env.delete(key);
+  globalThis.fetch = async (resource, init) => {
+    const url = String(resource);
+    calls.push({ url, method: init?.method ?? "GET", redirect: init?.redirect });
+    const index = courseDetails.indexOf(url);
+    if (index < 0) throw new Error("Expected an exact course detail request");
+    return fallback ? fallback(index) : htmlResponse(courseHtml(index));
+  };
+  return { calls, restore() {
+    globalThis.fetch = fetchBefore;
+    for (const [key, value] of browserSettings) if (value !== undefined) Deno.env.set(key, value);
+  } };
+}
+
+Deno.test("two retrieved Tabelog course details complete the saved v3 report with no new AI calls or costs", async () => {
+  const specialists = courseAgents();
+  const { original, completed } = completedCourseDraft(specialists);
+  const ledger = { ...cost(), attempt_number: 1, request_metadata: { synthesis_background: true,
+    response_status: "completed", provider_response_id: completed.responseId } };
+  const d = database([ledger], specialists);
+  const fetch = useCourseFetch();
+  try {
+    await executeJob(d.db, { ...job({ synthesisDraft: completed }), attempts: 2 }, run);
+    assert.deepEqual(fetch.calls.map(call => call.url).sort(), [...courseDetails].sort());
+    assert.ok(fetch.calls.every(call => call.method === "GET" && call.redirect === "manual"));
+    assert.equal(d.writes.length, 0);
+    const finish = d.rpcCalls.find(call => call.name === "restaurant_insight_finish_job").args;
+    assert.equal(finish.p_error, null);
+    assert.equal(d.saved.synthesisComplete, true);
+    assert.deepEqual(d.saved.synthesisDraft, completed);
+    assert.equal(d.saved.sourceRecovery.status, "recovered");
+    assert.equal(d.saved.sourceRecovery.additionalGenerations, 0);
+    assert.equal(d.saved.sourceRecovery.costId, completed.costId);
+    const pages = d.saved.sourceRecovery.courseDetailVerification;
+    assert.deepEqual(pages.map((page: any) => page.requestedUrl).sort(), [...courseDetails].sort());
+    for (const [index, url] of courseDetails.entries()) {
+      const page = pages.find((p: any) => p.requestedUrl === url);
+      assert.equal(page.url, url);
+      assert.ok(Number.isFinite(Date.parse(page.retrievedAt)));
+      assert.ok(page.text.includes(courses[index].price));
+      assert.ok(page.text.includes(courses[index].listedCount));
+      assert.ok(page.text.includes(courses[index].describedCount));
+      assert.ok(d.saved.report_row.report_sources.includes(url));
+    }
+    const { qualityGate, productInventory, originalProductInventory, ...savedReport } = JSON.parse(d.saved.report_row.report);
+    assert.deepEqual(savedReport, original);
+    assert.equal(qualityGate.version, 3);
+    assert.equal(qualityGate.courseDetailVerification.additionalGenerations, 0);
+    assert.deepEqual(qualityGate.courseDetailVerification.pages.map((page: any) => page.url).sort(), [...courseDetails].sort());
+    assert.ok(qualityGate.courseDetailVerification.pages.every((page: any) =>
+      page.requestedUrl === page.url && Number.isFinite(Date.parse(page.retrievedAt)) && !Object.hasOwn(page, "text")));
+    assert.deepEqual(productInventory.map((product: any) => product.source), courseDetails);
+    assert.deepEqual(originalProductInventory.map((product: any) => product.source), [courseList, courseList]);
+  } finally {
+    fetch.restore();
+  }
+});
+
+Deno.test("a different course or a successful response without course detail cannot authorize a citation", async () => {
+  const specialists = courseAgents();
+  const { completed } = completedCourseDraft(specialists);
+  for (const invalid of [
+    () => new Response(null, { status: 302, headers: { location: courseDetails[0] } }),
+    () => htmlResponse(courseHtml(1).replace("</head>", `<link rel="canonical" href="${courseDetails[0]}"></head>`)),
+    () => htmlResponse("<html><head><title>コース一覧 | 食べログ</title></head><body>コース料金 13,000円 品数 6品</body></html>"),
+  ]) {
+    const fetch = useCourseFetch(index => index === 0 ? htmlResponse(courseHtml(0)) : invalid());
+    const d = database([{
+      ...cost(), request_metadata: { response_status: "completed", provider_response_id: completed.responseId },
+    }], specialists);
+    try {
+      await executeJob(d.db, job({ synthesisDraft: completed }), run);
+      assert.deepEqual(fetch.calls.map(call => call.url).sort(), [...courseDetails].sort());
+      const finish = d.rpcCalls.find(call => call.name === "restaurant_insight_finish_job").args;
+      assert.equal(finish.p_retryable, false);
+      assert.match(finish.p_error, /追跡可能なURL/);
+      assert.equal(d.saved.sourceRecovery.status, "needs_review");
+      assert.equal(d.saved.sourceRecovery.additionalGenerations, 0);
+      assert.deepEqual(d.saved.synthesisDraft, completed);
+      assert.equal(d.saved.report_row, undefined);
+      assert.equal(d.writes.length, 0);
+    } finally {
+      fetch.restore();
+    }
+  }
+});
+
+Deno.test("course detail recovery is scoped to the store with a fetched course list and preserves other validation gates", async () => {
+  await noNetwork(async () => {
+    const specialists = courseAgents();
+    const { completed } = completedCourseDraft(specialists);
+    const noVerifiedList = specialists.map(agent => ({ ...agent, directPages: [] }));
+    await assert.rejects(() => finalizeSynthesis(input, noVerifiedList, completed), /追跡可能なURL/);
+    const known = { ...completed, toolSources: [...completed.toolSources, ...courseDetails] };
+    const alreadyValid = await finalizeSynthesis(input, specialists, known);
+    assert.equal(alreadyValid.sourceRecovery.status, "unchanged");
+    for (const foreign of [
+      courseDetails[1].replace("13019866", "99999999"),
+      courseDetails[1].replace("tabelog.com", "tabelog.com.example.test"),
+      `${parent}dtlmenu/lunch/`,
+    ]) {
+      const { completed: foreignDraft } = completedCourseDraft(specialists, [courseDetails[0], foreign]);
+      await assert.rejects(() => finalizeSynthesis(input, specialists, { ...foreignDraft, toolSources: [...foreignDraft.toolSources, courseDetails[0]] }), /追跡可能なURL/);
+    }
+  });
+  const specialists = courseAgents();
+  const { completed } = completedCourseDraft(specialists);
+  const damaged = JSON.parse(completed.text);
+  damaged.report.actionPlan[0].findingIds = ["nonexistent"];
+  const fetch = useCourseFetch();
+  try {
+    await assert.rejects(() => finalizeSynthesis(input, specialists, { ...completed, text: JSON.stringify(damaged) }), /scope|施策/);
+    assert.deepEqual(fetch.calls.map(call => call.url).sort(), [...courseDetails].sort());
+  } finally {
+    fetch.restore();
+  }
 });
 Deno.test("v2 and v3 completed draft and terminal checkpoints recover without provider calls or cost writes", async () => {
   await noNetwork(async () => {

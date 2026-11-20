@@ -23,6 +23,7 @@ const BROWSER_DEADLINE_MS = 20_000;
 const BROWSER_COOLDOWN_MS = 10_100;
 // Preserve 300s for Gemini and 10s for DB operations within the 360s job lease.
 const PAGE_COLLECTION_BUDGET_MS = 50_000;
+const MAX_COURSE_DETAIL_CHECKS = 5;
 const monotonicNow = globalThis.performance?.now?.bind(globalThis.performance);
 const wallClockOrigin = Date.now() - (monotonicNow?.() ?? 0);
 const browserTiming: BrowserTiming = {
@@ -31,6 +32,8 @@ const browserTiming: BrowserTiming = {
 };
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
 const TABLELOG_ROUTE = /^\/[a-z][a-z0-9-]*\/A\d{4}\/A\d{6}\/\d{8}(?=\/(?:party\/)?$)/;
+const TABLELOG_COURSE_DETAIL = /^(\/[a-z][a-z0-9-]*\/A\d{4}\/A\d{6}\/\d{8})\/party\/\d{1,12}$/;
+const TABLELOG_HOSTS = new Set(["tabelog.com", "www.tabelog.com"]);
 
 function httpsUrl(value: string, base?: URL) {
   try {
@@ -52,12 +55,21 @@ function officialIdentity(url: URL) {
 const officialPages = new Map(storeCatalog.map(({ url }) => [officialIdentity(new URL(url)), url]));
 
 function tabelogPath(url: URL | null) {
-  if (!url || !["tabelog.com", "www.tabelog.com"].includes(url.hostname)) return undefined;
+  if (!url || !TABLELOG_HOSTS.has(url.hostname)) return undefined;
   return withTrailingSlash(url.pathname).match(TABLELOG_ROUTE)?.[0];
+}
+
+function tabelogCourseDetail(url: URL | null) {
+  if (!url || url.search || !TABLELOG_HOSTS.has(url.hostname)) return null;
+  return url.pathname.replace(/\/$/, "").match(TABLELOG_COURSE_DETAIL);
 }
 
 function samePage(kind: DirectPageKind, initial: URL, candidate: URL | null) {
   if (!candidate || candidate.search) return false;
+  if (kind === "tabelog-course-detail") {
+    const path = tabelogCourseDetail(initial)?.[0];
+    return !!path && tabelogCourseDetail(candidate)?.[0] === path;
+  }
   return kind === "official" ? officialIdentity(candidate) === officialIdentity(initial)
     : tabelogPath(candidate) === tabelogPath(initial) && withTrailingSlash(candidate.pathname) === initial.pathname;
 }
@@ -130,7 +142,7 @@ async function fetchPage(kind: DirectPageKind, url: string, get: typeof fetch): 
         return unavailable(response.ok ? "HTMLのページを取得できませんでした" : `ページがHTTP ${response.status}を返しました`);
       }
       const html = await readBoundedText(response, contentType);
-      const page = extractDirectPage(kind, html);
+      const page = extractDirectPage(kind, html, current.href);
       return page
         ? { kind, url: current.href, status: "retrieved", retrievedAt: new Date().toISOString(), ...page }
         : unavailable("店舗情報として読める本文が見つかりませんでした");
@@ -248,7 +260,6 @@ export async function loadDirectPages(
   renderer?: BrowserRunConfig, timing = browserTiming,
 ) {
   const deadline = timing.now() + PAGE_COLLECTION_BUDGET_MS;
-  const browser = renderer && browserRunConfig(renderer.accountId, renderer.token);
   const official = httpsUrl(storeUrl);
   const catalogUrl = official && officialPages.get(officialIdentity(official));
   const load = (kind: DirectPageKind, url: string) => {
@@ -274,7 +285,11 @@ export async function loadDirectPages(
       pages.push(searchOnly("tabelog-store", tabelog.url, reason), searchOnly("tabelog-courses", "", reason));
     }
   }
-  const results = await Promise.all(pages);
+  return await loadBrowserFallbacks(await Promise.all(pages), get, renderer, deadline, timing);
+}
+
+async function loadBrowserFallbacks(results: DirectPage[], get: typeof fetch, renderer: BrowserRunConfig | undefined, deadline: number, timing: BrowserTiming) {
+  const browser = renderer && browserRunConfig(renderer.accountId, renderer.token);
   if (!browser) return results;
   let nextBrowserAt = 0;
   let lastLimit: BrowserRateLimit | undefined;
@@ -305,6 +320,37 @@ export async function loadDirectPages(
     }
   }
   return results;
+}
+
+export async function verifyTabelogCourseSources(sources: string[], saved: DirectPage[], renderer?: BrowserRunConfig, get: typeof fetch = fetch) {
+  const parents = new Set(saved.flatMap((page) => {
+    if (page.kind !== "tabelog-courses" || page.status !== "retrieved" || !page.text?.trim() || !page.retrievedAt) return [];
+    const url = httpsUrl(page.url);
+    const store = tabelogPath(url);
+    return url && !url.search && store && withTrailingSlash(url.pathname) === `${store}/party/` ? [store] : [];
+  }));
+  if (!parents.size) return [];
+  // Group only spelling variants of an individual detail, never adjacent course IDs.
+  const requests = new Map<string, Set<string>>();
+  for (const source of sources) {
+    const detail = tabelogCourseDetail(httpsUrl(source));
+    if (!detail || !parents.has(detail[1])) continue;
+    if (!requests.has(detail[0])) {
+      if (requests.size >= MAX_COURSE_DETAIL_CHECKS) continue;
+      requests.set(detail[0], new Set());
+    }
+    requests.get(detail[0])!.add(source);
+  }
+  if (!requests.size) return [];
+  const entries = [...requests];
+  const deadline = browserTiming.now() + PAGE_COLLECTION_BUDGET_MS;
+  const pages = await Promise.all(entries.map(([path]) => fetchPage("tabelog-course-detail", `https://tabelog.com${path}`, get)));
+  await loadBrowserFallbacks(pages, get, renderer, deadline, browserTiming);
+  return pages.flatMap((page, index) => {
+    if (page.status !== "retrieved") return [];
+    const [requestedUrl, ...aliases] = entries[index][1];
+    return [{ ...page, requestedUrl, ...(aliases.length ? { aliases } : {}) }];
+  });
 }
 
 export function directPageReceipts(pages: DirectPage[]): DirectPageReceipt[] {

@@ -1,6 +1,7 @@
 import { load, type CheerioAPI } from "npm:cheerio@1.1.2/slim";
+import { extractRenderedTabelogCourseDetail, extractTabelogCourseDetail, TABELOG_COURSE_DETAIL_SELECTORS } from "./tabelog-course-detail.ts";
 
-export type DirectPageKind = "official" | "tabelog-store" | "tabelog-courses";
+export type DirectPageKind = "official" | "tabelog-store" | "tabelog-courses" | "tabelog-course-detail";
 type ExcerptLimits = { truncated: boolean };
 type PageExcerpt = { title: string; text: string; truncated?: boolean };
 
@@ -128,7 +129,8 @@ function pageExcerpt(title: string, text: string | null, limits: ExcerptLimits):
   return limits.truncated ? { ...excerpt, truncated: true } : excerpt;
 }
 
-export function extractDirectPage(kind: DirectPageKind, html: string): PageExcerpt | null {
+export function extractDirectPage(kind: DirectPageKind, html: string, expectedUrl?: string): PageExcerpt | null {
+  if (kind === "tabelog-course-detail") return extractTabelogCourseDetail(html, expectedUrl);
   const $ = load(html);
   const title = line($("title").first().text());
   if (!title || ERROR_TITLE.test(title)) return null;
@@ -144,6 +146,7 @@ export function extractDirectPage(kind: DirectPageKind, html: string): PageExcer
 export function renderedPageSelectors(kind: DirectPageKind): string[] {
   if (kind === "tabelog-store") return ["body", ".rstinfo-table tr"];
   if (kind === "tabelog-courses") return ["body", ".rstdtl-course-list"];
+  if (kind === "tabelog-course-detail") return TABELOG_COURSE_DETAIL_SELECTORS;
   return ["body"];
 }
 
@@ -191,6 +194,7 @@ function renderedOfficialText(body: string, limits: ExcerptLimits) {
 }
 
 export function extractRenderedDirectPage(kind: DirectPageKind, pageTitle: string, body: string, items: string[]): PageExcerpt | null {
+  if (kind === "tabelog-course-detail") return extractRenderedTabelogCourseDetail(pageTitle, body, items);
   const title = line(pageTitle);
   const visibleBody = line(body);
   if (!title || ERROR_TITLE.test(title) || !visibleBody) return null;
