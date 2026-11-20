@@ -35,7 +35,7 @@ type CostEvent = {
   attempt_number?: number | null;
   request_metadata?: { provider_error?: ProviderDiagnosticError; http_status?: number | null; duration_ms?: number; timeout_ms?: number;
     request_phase?: string; transport_error?: string; reconciliation_status?: string;
-    research_mode?: "full" | "incremental"; full_fallback_reason?: string };
+    research_mode?: "full" | "incremental"; full_fallback_reason?: string; google_search_enabled?: boolean };
 };
 type Health = { openai: boolean; gemini: boolean; xai: boolean };
 type Tab = "report" | "agents" | "critique";
@@ -204,7 +204,10 @@ function CostPage({ reports, costs, loading, error, onRefresh }: { reports: Repo
   const recentEvents = costs.slice(0, 80);
   const usageSummary = (event: CostEvent) => {
     const u = event.usage ?? {};
-    return [u.input_tokens != null && `入力 ${u.input_tokens.toLocaleString()} tok`, u.output_tokens != null && `出力 ${u.output_tokens.toLocaleString()} tok`, (u.web_search_calls ?? 0) > 0 && `Web検索 ${u.web_search_calls}回`, (u.google_search_queries ?? 0) > 0 && `Google検索 ${u.google_search_queries}件`, (u.x_posts_fetched ?? 0) > 0 && `X投稿 ${u.x_posts_fetched}件`, (u.x_users_fetched ?? 0) > 0 && `Xプロフィール ${u.x_users_fetched}件`].filter(Boolean).join(" · ") || "最終利用量の記録なし";
+    const googleSearchCount = u.google_search_queries;
+    // Older records could store zero when Gemini omitted the search information.
+    const showGoogleSearchCount = googleSearchCount != null && (googleSearchCount > 0 || event.request_metadata?.google_search_enabled === true);
+    return [u.input_tokens != null && `入力 ${u.input_tokens.toLocaleString()} tok`, u.output_tokens != null && `出力 ${u.output_tokens.toLocaleString()} tok`, (u.web_search_calls ?? 0) > 0 && `Web検索 ${u.web_search_calls}回`, showGoogleSearchCount && `Google検索 ${googleSearchCount}件`, (u.x_posts_fetched ?? 0) > 0 && `X投稿 ${u.x_posts_fetched}件`, (u.x_users_fetched ?? 0) > 0 && `Xプロフィール ${u.x_users_fetched}件`].filter(Boolean).join(" · ") || "最終利用量の記録なし";
   };
   return <section className="cost-page">
     <div className="cost-page-heading"><div><span className="eyebrow">API USAGE & COST</span><h2>API料金・利用量</h2><p>AIのAPI応答ごとに、返却されたトークン数と検索件数から費用を積算します。</p></div><span className="cost-currency">USD · 公式標準単価</span></div>

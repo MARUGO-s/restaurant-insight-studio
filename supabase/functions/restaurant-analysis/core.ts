@@ -169,7 +169,7 @@ type MeterContext = { costDb: any; userId: string; runId?: string; reportId?: st
 const pricingAsOf = () => new Date().toISOString().slice(0, 10);
 const asCount = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null;
 
-function readUsage(provider: string, model: string, data: any, pricingDate = pricingAsOf()) {
+function readUsage(provider: string, model: string, data: any, pricingDate = pricingAsOf(), googleSearchEnabled = false) {
   const usage = provider === "Google Gemini" ? data?.usageMetadata : data?.usage;
   if (!usage || typeof usage !== "object") return { measurementStatus: "unknown", usage: {}, rates: {}, cost: null as number | null };
   let inputTokens: number | null = null, cachedInputTokens = 0, cacheWriteTokens = 0, outputTokens: number | null = null;
@@ -184,7 +184,8 @@ function readUsage(provider: string, model: string, data: any, pricingDate = pri
     const distinctQueries = new Set(queryLists.flat()
       .filter((query): query is string => typeof query === "string")
       .map(query => query.trim()).filter(Boolean));
-    googleSearchQueries = queryLists.length ? distinctQueries.size : ((usage.toolUsePromptTokenCount ?? 0) > 0 ? null : 0);
+    // Google Search can be enabled without returning tool-use token counts.
+    googleSearchQueries = queryLists.length ? distinctQueries.size : (googleSearchEnabled || toolPrompt > 0 ? null : 0);
   } else {
     inputTokens = asCount(usage.input_tokens ?? usage.prompt_tokens);
     cachedInputTokens = asCount(usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens) ?? 0;
@@ -242,7 +243,8 @@ function readUsage(provider: string, model: string, data: any, pricingDate = pri
 }
 
 async function saveCost(context: MeterContext, id: string, provider: string, model: string, requestStatus: string, data: any, metadata: Record<string, unknown>, insert = false) {
-  const calculated = readUsage(provider, model, data);
+  const pricingDate = pricingAsOf();
+  const calculated = readUsage(provider, model, data, pricingDate, metadata.google_search_enabled === true);
   const row = {
     user_id: context.userId, run_id: context.runId ?? null, report_id: context.reportId ?? null,
     job_id: context.jobId ?? null, attempt_number: context.attempt ?? null,
@@ -251,7 +253,7 @@ async function saveCost(context: MeterContext, id: string, provider: string, mod
     usage: calculated.usage, rates: calculated.rates,
     list_price_usd: requestStatus === "unknown" ? null : calculated.cost ??
       (requestStatus === "failed" && [400, 401, 403, 404, 422, 429].includes(Number(metadata.http_status)) ? 0 : null),
-    pricing_as_of: pricingAsOf(), request_metadata: metadata,
+    pricing_as_of: pricingDate, request_metadata: metadata,
   };
   // The initial links are immutable. Deletion can detach them while a provider is
   // answering; restoring those foreign keys would lose the final metering update.
@@ -380,6 +382,7 @@ async function requestJson(url: string, key: string, payload: any, keyInQuery: b
     ...(latest.error ? { response_error_code: safeProviderMessage(latest.error.code, key, 100), response_error_message: safeProviderMessage(latest.error.message, key, 300) } : {}),
     ...(streamFailure || latest.stream_diagnostics ? { stream_diagnostics: streamFailure ?? latest.stream_diagnostics } : {}),
     ...(provider === "Google Gemini" ? {
+      google_search_enabled: Array.isArray(payload.tools) && payload.tools.some((tool: { google_search?: unknown } | null) => tool?.google_search !== undefined),
       finish_reasons: [...new Set((Array.isArray(latest.candidates) ? latest.candidates : []).map((candidate: any) => candidate?.finishReason).filter((reason: unknown) => typeof reason === "string" && /^[A-Z_]{1,50}$/.test(reason)))],
       usage_counts: Object.fromEntries(["promptTokenCount", "cachedContentTokenCount", "candidatesTokenCount", "thoughtsTokenCount", "totalTokenCount", "toolUsePromptTokenCount"]
         .filter(name => asCount(latest.usageMetadata?.[name]) !== null).map(name => [name, asCount(latest.usageMetadata[name])])),

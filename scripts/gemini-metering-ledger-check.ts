@@ -15,11 +15,14 @@ const usageMetadata = {
   thoughtsTokenCount: 2949,
   totalTokenCount: 15008,
 };
+const usageWithTool = { ...usageMetadata, promptTokenCount: 4859, toolUsePromptTokenCount: 1 };
 const [rentalQuery, courseQuery, storeQuery] = ["Bistro CAVA CAVA 貸切", "Bistro CAVA CAVA コース", "ビストロ サヴァサヴァ 店舗情報"];
 const cases = [
   { label: "seven_distinct", queries: [[rentalQuery, courseQuery, storeQuery, "営業時間", "個室"], ["口コミ", "予約"]], count: 7, cost: 0.13771955 },
   { label: "seven_with_blank_and_duplicates", queries: [[rentalQuery, "", courseQuery, rentalQuery], ["\t　 ", ` ${courseQuery}  `, storeQuery]], count: 3, cost: 0.08171955 },
   { label: "three_distinct", queries: [[rentalQuery, courseQuery, storeQuery]], count: 3, cost: 0.08171955 },
+  { label: "all_blank", queries: [["", "\t\n", "　"]], usage: usageWithTool, count: 0, cost: 0.03971955 },
+  { label: "missing_search_metadata", queries: [undefined], count: null, cost: null },
 ];
 
 async function checkLedger(scenario: typeof cases[number]) {
@@ -34,10 +37,10 @@ async function checkLedger(scenario: typeof cases[number]) {
       assert.equal(rows.size, 1);
       assert.equal([...rows.values()][0].request_status, "unknown");
       calls.push("synthetic Gemini response");
-      return Response.json({ model: "gemini-3.8-flash", usageMetadata,
+      return Response.json({ model: "gemini-3.8-flash", usageMetadata: scenario.usage ?? usageMetadata,
         candidates: scenario.queries.map((webSearchQueries, index) => ({
           finishReason: "STOP",
-          groundingMetadata: { webSearchQueries },
+          ...(webSearchQueries && { groundingMetadata: { webSearchQueries } }),
           ...(index === 0 ? { content: { parts: [{ text: "掲載調査の検証用データです。\n<MENU_INVENTORY>[]</MENU_INVENTORY>" }] } } : {}),
         })),
       });
@@ -62,14 +65,16 @@ async function checkLedger(scenario: typeof cases[number]) {
     assert.equal(url.searchParams.get("id"), `eq.${id}`);
     assert.equal(url.searchParams.get("user_id"), `eq.${userId}`);
     assert.equal(body.request_status, "succeeded");
-    assert.equal(body.measurement_status, "complete");
+    assert.equal(body.measurement_status, scenario.cost === null ? "partial" : "complete");
+    assert.equal(body.request_metadata.google_search_enabled, true);
     assert.equal(body.pricing_as_of, "2026-11-20");
     assert.equal(body.usage.google_search_queries, scenario.count);
     assert.equal(body.usage.input_tokens, 4860);
     assert.equal(body.usage.cached_input_tokens, 2934);
     assert.equal(body.usage.output_tokens, 10148);
     assert.equal(body.rates.google_search_usd_per_query, 0.014);
-    assert.ok(Math.abs(body.list_price_usd - scenario.cost) < 1e-10);
+    if (scenario.cost === null) assert.equal(body.list_price_usd, null);
+    else assert.ok(Math.abs(body.list_price_usd - scenario.cost) < 1e-10);
     rows.set(id, { ...rows.get(id), ...body });
     calls.push("ledger update");
     return new Response(null, { status: 204 });

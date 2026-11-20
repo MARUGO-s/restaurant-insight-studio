@@ -49,6 +49,8 @@ const expected = new Map([
   ["seven_distinct", ["Google検索 7件", "$0.137720"]],
   ["seven_with_blank_and_duplicates", ["Google検索 3件", "$0.081720"]],
   ["three_distinct", ["Google検索 3件", "$0.081720"]],
+  ["all_blank", ["Google検索 0件", "$0.039720"]],
+  ["missing_search_metadata", [undefined, "料金未確定"]],
 ]);
 
 globalThis.fetch = noNetwork;
@@ -64,7 +66,7 @@ for (const { label, row } of scenarios) {
   assert.equal((ledger.match(/class="cost-event"/g) ?? []).length, 1);
   assert.match(ledger, /グルメ媒体調査/);
   const searchCount = ledger.match(/Google検索 \d+件/)?.[0];
-  const price = ledger.match(/<div class="cost-event-price"><b>(\$[0-9.]+)<\/b>/)?.[1];
+  const price = ledger.match(/<div class="cost-event-price"><b>([^<]+)<\/b>/)?.[1];
   assert.deepEqual([searchCount, price], expected.get(label), label);
   expected.delete(label);
 }
