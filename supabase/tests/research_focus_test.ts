@@ -43,6 +43,15 @@ Deno.test("all specialists and synthesis receive focus while blank preserves nor
   assert.ok(focusedSynthesis.includes("調査できなかった希望は理由と追加確認先"));
 });
 
+Deno.test("market research targets three comparable competitors with readable primary evidence", () => {
+  const { market } = buildResearchPrompts(input);
+  assert.match(market, /店舗公式の予約・メニューページの本文を実読できた3店を目安に比較する（最大5店）/);
+  assert.match(market, /3店に満たなければ.*隣接駅周辺/);
+  assert.match(market, /確認した文言・値と出典URL、確認日を店ごとに示す/);
+  assert.match(market, /検索要約のみ・本文未取得の候補は確認済み店舗数に含めない/);
+  assert.match(market, /比較できた店舗数と不足の理由/);
+});
+
 Deno.test("queue stores original normalized focus for every retry and omits empty focus", async () => {
   const previousKeys = [Deno.env.get("OPENAI_API_KEY"), Deno.env.get("GEMINI_API_KEY"), Deno.env.get("XAI_API_KEY")];
   Deno.env.set("OPENAI_API_KEY", "test-only"); Deno.env.set("GEMINI_API_KEY", "test-only"); Deno.env.set("XAI_API_KEY", "test-only");

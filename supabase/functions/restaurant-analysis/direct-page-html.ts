@@ -1,9 +1,12 @@
 import { load, type CheerioAPI } from "npm:cheerio@1.1.2/slim";
+import { extractGoogleMapsHtml, MAPS_ADDRESS_SELECTOR, MAPS_NAME_SELECTOR } from "./google-maps-profile.ts";
 import { extractRenderedTabelogCourseDetail, extractTabelogCourseDetail, TABELOG_COURSE_DETAIL_SELECTORS } from "./tabelog-course-detail.ts";
 
-export type DirectPageKind = "official" | "tabelog-store" | "tabelog-courses" | "tabelog-course-detail";
+export type DirectPageKind = "official" | "tabelog-store" | "tabelog-courses" | "tabelog-course-detail" | "google-maps";
 type ExcerptLimits = { truncated: boolean };
 type PageExcerpt = { title: string; text: string; truncated?: boolean };
+type CaptureCourseLink = (href: string, hasDishCountConflict: boolean) => void;
+type RenderedItem = { text: string; html?: string };
 
 const MAX_PAGE_CHARS = 16_000;
 const MAX_COURSES = 20;
@@ -60,7 +63,24 @@ function storeText($: CheerioAPI, limits: ExcerptLimits): string | null {
   return storeFieldsText(fields);
 }
 
-function courseText($: CheerioAPI, limits: ExcerptLimits): string | null {
+function dishCount(value: string) {
+  const counts = new Set(Array.from(value.normalize("NFKC").matchAll(/(?<!\d)(\d{1,2})\s*品/g), (match) => Number(match[1])));
+  return counts.size === 1 ? counts.values().next().value : undefined;
+}
+
+function captureCourseLinks(
+  $: CheerioAPI, links: ReturnType<CheerioAPI>, title: string, description: string, capture: CaptureCourseLink,
+) {
+  const inTitle = dishCount(title);
+  const inDescription = dishCount(description);
+  const hasDishCountConflict = inTitle !== undefined && inDescription !== undefined && inTitle !== inDescription;
+  links.each((_, element) => {
+    const href = $(element).attr("href");
+    if (href) capture(href, hasDishCountConflict);
+  });
+}
+
+function courseText($: CheerioAPI, limits: ExcerptLimits, capture?: CaptureCourseLink): string | null {
   const page = $(".course-list").first();
   const cards = page.length ? page.find(".rstdtl-course-list") : $(".rstdtl-course-list");
   if (!cards.length) return null;
@@ -82,6 +102,7 @@ function courseText($: CheerioAPI, limits: ExcerptLimits): string | null {
       limits.truncated = true;
       continue;
     }
+    if (capture) captureCourseLinks($, card.find("a[href]").add(card.filter("a[href]")), title, description, capture);
     courses.push([
       fieldLine(limits, "見出し", title, 140),
       fieldLine(limits, "表示ラベル", badge, 35),
@@ -129,7 +150,10 @@ function pageExcerpt(title: string, text: string | null, limits: ExcerptLimits):
   return limits.truncated ? { ...excerpt, truncated: true } : excerpt;
 }
 
-export function extractDirectPage(kind: DirectPageKind, html: string, expectedUrl?: string): PageExcerpt | null {
+export function extractDirectPage(
+  kind: DirectPageKind, html: string, expectedUrl?: string, capture?: CaptureCourseLink,
+): PageExcerpt | null {
+  if (kind === "google-maps") return extractGoogleMapsHtml(html);
   if (kind === "tabelog-course-detail") return extractTabelogCourseDetail(html, expectedUrl);
   const $ = load(html);
   const title = line($("title").first().text());
@@ -139,11 +163,12 @@ export function extractDirectPage(kind: DirectPageKind, html: string, expectedUr
   $("h1, h2, h3, h4, h5, h6, p, li, dt, dd").before("\n").after("\n");
 
   const limits = { truncated: false };
-  const text = kind === "tabelog-store" ? storeText($, limits) : kind === "tabelog-courses" ? courseText($, limits) : officialText($, limits);
+  const text = kind === "tabelog-store" ? storeText($, limits) : kind === "tabelog-courses" ? courseText($, limits, capture) : officialText($, limits);
   return pageExcerpt(title, text, limits);
 }
 
 export function renderedPageSelectors(kind: DirectPageKind): string[] {
+  if (kind === "google-maps") return ["body", MAPS_NAME_SELECTOR, MAPS_ADDRESS_SELECTOR];
   if (kind === "tabelog-store") return ["body", ".rstinfo-table tr"];
   if (kind === "tabelog-courses") return ["body", ".rstdtl-course-list"];
   if (kind === "tabelog-course-detail") return TABELOG_COURSE_DETAIL_SELECTORS;
@@ -161,12 +186,20 @@ function renderedStoreText(rows: string[], limits: ExcerptLimits) {
   return storeFieldsText(fields);
 }
 
-function renderedCourseText(cards: string[], limits: ExcerptLimits) {
-  const visibleCards = cards.map(lines).filter((card) => card.length > 1 && COURSE_DETAILS.test(card.join(" ")));
+function renderedCourseText(cards: RenderedItem[], limits: ExcerptLimits, capture?: CaptureCourseLink) {
+  const visibleCards = cards.map(({ text, html }) => ({ card: lines(text), html }))
+    .filter(({ card }) => card.length > 1 && COURSE_DETAILS.test(card.join(" ")));
   if (!visibleCards.length) return null;
   const count = Math.min(visibleCards.length, MAX_COURSES);
   const cardLimit = Math.floor((MAX_PAGE_CHARS - 200) / count) - 2;
-  const excerpts = visibleCards.slice(0, count).map((card) => {
+  const excerpts = visibleCards.slice(0, count).map(({ card, html }) => {
+    if (capture && typeof html === "string" && html) {
+      const $ = load(html, {}, false);
+      const titleElement = $(".rstdtl-course-list__course-title").first();
+      const title = titleElement.find(".rstdtl-course-list__course-title-text").first().text() || titleElement.text() || card[0];
+      const description = $(".rstdtl-course-list__desc").first().text() || card.slice(1).join("\n");
+      captureCourseLinks($, $("a[href]"), title, description, capture);
+    }
     const full = card.join("\n");
     if (full.length <= cardLimit) return full;
     const detailBudget = Math.min(350, Math.floor(cardLimit / 3));
@@ -193,8 +226,10 @@ function renderedOfficialText(body: string, limits: ExcerptLimits) {
   return [prefix, clipped(limits, details.join("\n"), 3_000)].filter(Boolean).join("\n\n");
 }
 
-export function extractRenderedDirectPage(kind: DirectPageKind, pageTitle: string, body: string, items: string[]): PageExcerpt | null {
-  if (kind === "tabelog-course-detail") return extractRenderedTabelogCourseDetail(pageTitle, body, items);
+export function extractRenderedDirectPage(
+  kind: DirectPageKind, pageTitle: string, body: string, items: RenderedItem[], capture?: CaptureCourseLink,
+): PageExcerpt | null {
+  if (kind === "tabelog-course-detail") return extractRenderedTabelogCourseDetail(pageTitle, body, items.map(({ text }) => text));
   const title = line(pageTitle);
   const visibleBody = line(body);
   if (!title || ERROR_TITLE.test(title) || !visibleBody) return null;
@@ -205,9 +240,11 @@ export function extractRenderedDirectPage(kind: DirectPageKind, pageTitle: strin
   // A browser can return textContent for a queried element hidden by its own
   // styles. Only use text that is also present in the rendered body's innerText.
   const visibleItems = items.filter((item) => {
-    const text = line(item);
+    const text = line(item.text);
     return text !== "" && visibleBody.includes(text);
   });
-  const text = kind === "tabelog-store" ? renderedStoreText(visibleItems, limits) : renderedCourseText(visibleItems, limits);
+  const text = kind === "tabelog-store"
+    ? renderedStoreText(visibleItems.map(({ text }) => text), limits)
+    : renderedCourseText(visibleItems, limits, capture);
   return pageExcerpt(title, text, limits);
 }

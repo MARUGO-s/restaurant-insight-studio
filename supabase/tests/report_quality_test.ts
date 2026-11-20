@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { withIntegrityReviews } from "./report_integrity_fixture.ts";
-import { parseIntegratedReport, validateReportQuality, parseMenuInventory, sourceUrls, reportSourceUrls, buildSynthesisPrompt, synthesize } from "../functions/restaurant-analysis/core.ts";
+import { parseIntegratedReport, validateReportQuality, parseMenuInventory, sourceUrls, reportSourceUrls, buildResearchPrompts, buildSynthesisPrompt, synthesize } from "../functions/restaurant-analysis/core.ts";
 import { evidenceUrl, qualityInput, qualityReport } from "./report_quality_fixture.ts";
 const gate = (report: any, input: any = qualityInput) => validateReportQuality(report, input, [evidenceUrl]);
 Deno.test("quality gate rejects formerly accepted empty summary and missing chapters", () => {
@@ -26,12 +26,34 @@ Deno.test("source matching permits stripped tracking but does not equate differe
   assert.doesNotThrow(() => validateReportQuality(report, qualityInput, [`${evidenceUrl}?utm_source=openai#conditions`]));
   assert.throws(() => validateReportQuality(report, qualityInput, [`${evidenceUrl}?store_id=OTHER`]), /追跡できない出典/);
 });
+Deno.test("Google Maps source matching accepts the same place URL across approved domains only", () => {
+  const report = qualityReport();
+  const place = "/maps/place/Bistro/data=!3m5!1s0x123:0x456!16s%2Fg%2Fexample";
+  const cited = `https://www.google.com${place}?entry=ttu`;
+  const observed = `https://www.google.co.jp${place}?hl=ja`;
+  report.keyFindings[0].sources = [cited];
+  assert.doesNotThrow(() => validateReportQuality(report, qualityInput, [evidenceUrl, observed]));
+  assert.throws(() => validateReportQuality(report, qualityInput, [evidenceUrl, observed.replace("0x456", "0x457")]), /追跡できない出典/);
+});
 Deno.test("focus must have its own response and custom target IDs are transmitted verbatim", () => {
   const input = { ...qualityInput, researchFocus: "宴会を重点調査", selectedSites: [{ id: "custom-17619293", name: "独自媒体", url: evidenceUrl }] };
   const prompt = buildSynthesisPrompt(input, [], "詳細章が不足: focus");
   assert.ok(prompt.includes('"targetId":"custom-17619293"')); assert.ok(prompt.includes("前回の構成検査"));
   const report = qualityReport(); assert.throws(() => gate(report, { ...qualityInput, researchFocus: input.researchFocus }), /focus/);
   assert.doesNotThrow(() => gate(qualityReport(true), { ...qualityInput, researchFocus: input.researchFocus }));
+});
+Deno.test("gourmet research and synthesis retain the same evidence fields for listing discrepancies", () => {
+  const { gourmet } = buildResearchPrompts(qualityInput);
+  const synthesis = buildSynthesisPrompt(qualityInput, []);
+  for (const prompt of [gourmet, synthesis]) {
+    assert.match(prompt, /駅名・出口・徒歩分数/);
+    assert.match(prompt, /通常のラストオーダー・コースの受付締切や最終入店時刻・事前予約の締切/);
+    assert.match(prompt, /席数・個室の区分・貸切可否と条件・最大予約可能人数/);
+    assert.match(prompt, /グラスワインの種類数・ワンドリンク制・チャージ/);
+    assert.match(prompt, /コースの見出しの品数・詳細の品数欄・内容欄で確認できた品目の数/);
+    assert.match(prompt, /対象月・曜日・時間帯.*出典URLと確認日.*項目ごとに未確認/);
+  }
+  assert.match(synthesis, /一次情報の本文で確認できた競合は、店ごとに固有名の行を設け/);
 });
 Deno.test("inventory preserves every acquired premium and party plan independently", () => {
   const plans = ["8500", "5500", "6500", "8000"].map((price, i) => ({ name: `プラン${i}`, price: `${price}円・税込`, conditions: "20〜60人・時間未確認", source: evidenceUrl, site: "食べログ" }));

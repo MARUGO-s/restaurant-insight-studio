@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { buildSynthesisPrompt, executeJob } from "../functions/restaurant-analysis/core.ts";
 import { directPageEvidence, directPageReceipts, loadDirectPages, verifyTabelogCourseSources } from "../functions/restaurant-analysis/direct-pages.ts";
+import { MAPS_ADDRESS_SELECTOR, MAPS_NAME_SELECTOR } from "../functions/restaurant-analysis/google-maps-profile.ts";
 
 const officialUrl = "https://www.bistro-cavacava.com/";
 const officialAlias = "https://bistro-cavacava.com/";
@@ -8,6 +9,7 @@ const storeUrl = "https://tabelog.com/tokyo/A1309/A130903/13245351/";
 const courseUrl = storeUrl + "party/";
 const courseDetailUrl = courseUrl + "266358552";
 const courseDetailSelector = "#rstdtl_party_dtl .course-dtl";
+const mapsUrl = "https://www.google.com/maps/place/Bistro+CAVA+CAVA/data=!1s0x11:0x22";
 const selectedTabelog = [{ id: "tabelog", name: "食べログ", url: storeUrl }];
 const renderer = { accountId: "abcdef0123456789abcdef0123456789", token: "browser-test-token" };
 const scrapeUrl = `https://api.cloudflare.com/client/v4/accounts/${renderer.accountId}/browser-rendering/scrape?cacheTTL=0`;
@@ -37,20 +39,32 @@ function storefrontPage() {
   </table>`, "ビストロ サヴァサヴァ 店舗情報 - 食べログ");
 }
 
-function coursesPage() {
+function coursesPage(links: string[] = [], outsideCard = "") {
   return htmlResponse(`<div class="course-list">
     <article class="rstdtl-course-list">
       <h3 class="rstdtl-course-list__course-title">Bコース 全6品</h3>
       <p class="rstdtl-course-list__desc">前菜からデザートまで全8品をご用意します。</p>
       <div class="rstdtl-course-list__price">8,800円</div>
       <div class="rstdtl-course-list__course-rule">2名様から</div>
+      ${links.map((href) => `<a href="${href}">コース詳細</a>`).join("")}
     </article>
     <article class="rstdtl-course-list">
       <h3 class="rstdtl-course-list__course-title">ノエルコース</h3>
       <p class="rstdtl-course-list__desc">12月の期間限定です。</p>
       <div class="rstdtl-course-list__price">15,000円</div>
     </article>
-  </div>`, "コース一覧 - ビストロ サヴァサヴァ - 食べログ");
+  </div>${outsideCard}`, "コース一覧 - ビストロ サヴァサヴァ - 食べログ");
+}
+
+function courseDetailPage(url = courseDetailUrl) {
+  return htmlResponse(`<link rel="canonical" href="${url}"><main id="rstdtl_party_dtl"><article class="course-dtl">
+    <h1 class="course-dtl__course-title">Bコース 全6品</h1>
+    <p class="course-dtl__desc">説明では全8品</p>
+    <table class="course-dtl__data-table">
+      <tr><th>品数</th><td>6品</td></tr>
+      <tr><th>コース内容</th><td>詳細ページ専用の記録</td></tr>
+    </table>
+  </article></main>`, "Bコース - 食べログ");
 }
 
 function directFetch(routes: Record<string, () => Response>) {
@@ -99,10 +113,12 @@ function browserFetch(direct: ReturnType<typeof directFetch>, render: (url: stri
     assert.ok(options?.signal instanceof AbortSignal);
     const request = JSON.parse(String(options?.body));
     assert.ok(direct.calls.includes(request.url), "a known page must be tried directly before opening a browser");
-    const selector = request.url === courseDetailUrl ? courseDetailSelector : request.url === courseUrl ? ".rstdtl-course-list" : request.url === storeUrl ? ".rstinfo-table tr" : "body";
+    const selector = request.url.startsWith(courseUrl) && request.url !== courseUrl ? courseDetailSelector
+      : request.url === courseUrl ? ".rstdtl-course-list" : request.url === storeUrl ? ".rstinfo-table tr" : "body";
     const contentSelectors = selector === "body" ? ["body"] : ["body", selector];
-    assert.deepEqual(request.elements.map((element: { selector: string }) => element.selector), [...contentSelectors, "title", "h1"]);
-    assert.equal(request.waitForSelector.selector, selector);
+    const expectedSelectors = request.url === mapsUrl ? ["body", MAPS_NAME_SELECTOR, MAPS_ADDRESS_SELECTOR] : [...contentSelectors, "title", "h1"];
+    assert.deepEqual(request.elements.map((element: { selector: string }) => element.selector), expectedSelectors);
+    assert.equal(request.waitForSelector.selector, request.url === mapsUrl ? MAPS_ADDRESS_SELECTOR : selector);
     const patterns = request.allowRequestPattern.map((value: string) => new RegExp(value));
     const allowed = (value: string) => patterns.some((pattern: RegExp) => pattern.test(value));
     assert.equal(allowed(request.url), true);
@@ -202,6 +218,126 @@ Deno.test("manual redirects cannot switch restaurant paths or reach unapproved d
   assert.deepEqual(calls.sort(), [officialUrl, storeUrl, courseUrl].sort());
   assert.equal(pages.length, 3);
   assert.ok(pages.every(page => page.status === "unavailable" && page.reason && !page.text));
+});
+
+Deno.test("course detail prefetch uses at most five distinct, same-store links from read cards", async () => {
+  const ids = [courseDetailUrl.split("/").at(-1)!, "2", "3", "4", "5", "6"];
+  const urls = ids.map((id) => courseUrl + id);
+  const wrongStore = courseDetailUrl.replace("13245351", "13245352");
+  const outside = courseUrl + "7";
+  const direct = directFetch({
+    [officialUrl]: officialPage,
+    [storeUrl]: storefrontPage,
+    [courseUrl]: () => coursesPage([
+      wrongStore, "https://example.test" + new URL(courseDetailUrl).pathname, courseDetailUrl + "?other=course",
+      ids[0], courseDetailUrl.replace("tabelog.com", "www.tabelog.com") + "/#heading", ...urls.slice(1),
+    ], `<a href="${outside}">対象カード外のリンク</a>`),
+    [urls[0]]: courseDetailPage,
+    [urls[1]]: () => Response.redirect(wrongStore),
+    [urls[2]]: () => courseDetailPage(wrongStore),
+  });
+  const pages = await loadDirectPages(officialUrl, selectedTabelog, direct.get);
+  assert.deepEqual(direct.calls, [officialUrl, storeUrl, courseUrl, ...urls.slice(0, 5)]);
+  const details = pages.filter((page) => page.kind === "tabelog-course-detail");
+  assert.deepEqual(details.map((page) => page.url), [courseDetailUrl]);
+  assert.match(details[0].text!, /品数：6品\nコース内容：詳細ページ専用の記録/);
+  assert.ok(details[0].retrievedAt);
+  const evidence = directPageEvidence(pages);
+  assert.match(evidence, /courseDetailUrlsは一覧で確認したリンクです/);
+  assert.match(evidence, /"kind":"tabelog-course-detail","url":"[^"]+\/266358552"/);
+  assert.ok(!evidence.includes(wrongStore));
+  const retry = directFetch({});
+  const recovered = await loadDirectPages(officialUrl, selectedTabelog, retry.get, pages);
+  assert.deepEqual(retry.calls, urls.slice(1, 5));
+  assert.deepEqual(recovered, pages);
+});
+
+Deno.test("the rendered course card yields exact detail links without another browser run", async () => {
+  for (const elapsed of [1_000, 50_000]) {
+    const hidden = courseUrl + "2";
+    const invisible = courseUrl + "3";
+    const timing = browserClock();
+    const direct = directFetch({
+      [officialUrl]: officialPage, [storeUrl]: storefrontPage,
+      [courseUrl]: () => new Response(null, { status: 503 }), [courseDetailUrl]: courseDetailPage,
+    });
+    const browser = browserFetch(direct, async () => {
+      timing.advance(elapsed);
+      const result = await renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse]).json();
+      const cards = result.result.find((group: { selector: string }) => group.selector === ".rstdtl-course-list").results;
+      cards[0].html = `<a href="${courseDetailUrl}">コース詳細</a>`;
+      cards.push(
+        { text: displayedCourse, html: `<a href="${hidden}">非表示のカード</a>`, height: 0, width: 50 },
+        { text: "別のコース\n10,000円", html: `<a href="${invisible}">画面本文外のカード</a>`, height: 50, width: 50 },
+      );
+      return Response.json(result);
+    });
+    const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, timing);
+    const expected = elapsed < 50_000 ? [courseDetailUrl] : [];
+    assert.deepEqual(browser.calls, [courseUrl]);
+    assert.deepEqual(direct.calls, [officialUrl, storeUrl, courseUrl, ...expected]);
+    assert.deepEqual(pages.filter((page) => page.kind === "tabelog-course-detail").map((page) => page.url), expected);
+  }
+});
+
+Deno.test("browser fallback prioritizes a conflicting detail and shares one deadline and cooldown with Maps", async () => {
+  const ordinary = courseUrl + "100";
+  const secondConflict = courseUrl + "300";
+  const name = "ビストロ サヴァサヴァ";
+  const address = "東京都新宿区荒木町1-2";
+  const detail = "Bコース 全6品\n説明では全8品\nコース料金\t8,800円\n品数\t6品";
+  const listings = [
+    [ordinary, "Aコース 全8品", "全8品を提供します。"],
+    [courseDetailUrl, "Bコース 全６品", "前菜から全８品と説明されています。"],
+    [secondConflict, "Bコースペアリング 全6品", "前菜から全8品を提供します。"],
+  ];
+  for (const listDuration of [3_000, 20_000]) {
+    const direct = directFetch({ [officialUrl]: officialPage });
+    const timing = browserClock();
+    const startedAt = timing.now();
+    const starts: number[] = [];
+    const browser = browserFetch(direct, async (url) => {
+      starts.push(timing.now() - startedAt);
+      if (url === storeUrl) {
+        timing.advance(6_000);
+        return renderedStorefront();
+      }
+      if (url === courseUrl) {
+        timing.advance(listDuration);
+        const result = await renderedPage(courseUrl, ".rstdtl-course-list",
+          listings.map(([, title, description]) => `${title}\n${description}\n8,800円`)).json();
+        const cards = result.result.find((group: { selector: string }) => group.selector === ".rstdtl-course-list").results;
+        for (const [index, [href, title, description]] of listings.entries()) {
+          cards[index].html = `<a href="${href}" class="rstdtl-course-list__course-title">${title}</a><p class="rstdtl-course-list__desc">${description}</p>`;
+        }
+        return Response.json(result);
+      }
+      if (url === courseDetailUrl) {
+        timing.advance(2_000);
+        return renderedPage(courseDetailUrl, courseDetailSelector, [detail]);
+      }
+      assert.equal(url, mapsUrl);
+      const result = await renderedPage(mapsUrl, MAPS_NAME_SELECTOR, [name], `${name}\n${address}`).json();
+      result.result.push({ selector: MAPS_ADDRESS_SELECTOR, results: [{ text: address, width: 100, height: 20 }] });
+      return Response.json(result);
+    });
+    const pages = await loadDirectPages(officialUrl, [...selectedTabelog, { id: "google_maps", url: mapsUrl }], browser.get, [], renderer, timing);
+    assert.deepEqual(direct.calls, [officialUrl, storeUrl, courseUrl, mapsUrl, courseDetailUrl, secondConflict, ordinary]);
+    const details = pages.filter((page) => page.kind === "tabelog-course-detail");
+    if (listDuration === 3_000) {
+      assert.deepEqual(browser.calls, [storeUrl, courseUrl, courseDetailUrl, mapsUrl]);
+      assert.deepEqual(starts, [0, 16_100, 29_200, 41_300]);
+      assert.equal(details[0]?.url, courseDetailUrl);
+      assert.equal(details[0]?.method, "browser");
+      assert.match(details[0]?.text ?? "", /品数 6品/);
+    } else {
+      assert.deepEqual(browser.calls, [storeUrl, courseUrl, mapsUrl]);
+      assert.deepEqual(starts, [0, 16_100, 46_200]);
+      assert.deepEqual(details, []);
+    }
+    assert.equal(pages.find((page) => page.kind === "google-maps")?.status, "retrieved");
+    assert.ok(timing.now() - startedAt < 50_000);
+  }
 });
 
 Deno.test("course detail browser fallback verifies the same page and captures its visible detail", async () => {
@@ -549,7 +685,8 @@ Deno.test("the gourmet worker supplies original page text to Gemini and preserve
   const { calls, get } = directFetch({
     [officialUrl]: officialPage,
     [storeUrl]: () => new Response("取得できません", { status: 403 }),
-    [courseUrl]: coursesPage,
+    [courseUrl]: () => coursesPage([courseDetailUrl]),
+    [courseDetailUrl]: courseDetailPage,
   });
   const requests: any[] = [];
   const input = {
@@ -563,6 +700,7 @@ Deno.test("the gourmet worker supplies original page text to Gemini and preserve
     assert.equal(options?.method, "POST");
     assert.equal(new Headers(options?.headers).get("x-goog-api-key"), "test-key-only");
     assert.match(checkpoints[0]?.p_output?.directPages?.find((page: any) => page.kind === "tabelog-courses")?.text ?? "", /全6品[\s\S]*全8品/);
+    assert.match(checkpoints[0]?.p_output?.directPages?.find((page: any) => page.kind === "tabelog-course-detail")?.text ?? "", /詳細ページ専用の記録/);
     requests.push(JSON.parse(String(options?.body)));
     return Response.json({
       candidates: [{
@@ -582,7 +720,7 @@ Deno.test("the gourmet worker supplies original page text to Gemini and preserve
     assert.equal(outputs[0].p_error, null);
     const agent = outputs[0].p_output;
     assert.equal(agent.status, "done");
-    assert.deepEqual(calls.sort(), [officialUrl, storeUrl, courseUrl].sort());
+    assert.deepEqual(calls.sort(), [officialUrl, storeUrl, courseUrl, courseDetailUrl].sort());
     assert.equal(requests.length, 1);
     const payload = requests[0];
     assert.deepEqual(payload.tools, [{ google_search: {} }]);
@@ -591,15 +729,17 @@ Deno.test("the gourmet worker supplies original page text to Gemini and preserve
     assert.match(prompt, /指定ページから取得した本文/);
     assert.match(prompt, /貸切は人数とご予算に応じてご相談/);
     assert.match(prompt, /Bコース 全6品[\s\S]*全8品/);
+    assert.match(prompt, /コース内容：詳細ページ専用の記録/);
     assert.doesNotMatch(prompt, /取得できません|本文として渡さないスクリプト/);
     assert.equal(costReservations.length, 1);
     assert.equal(costReservations[0].operation, "gourmet_research");
     assert.equal(costReservations[0].provider, "Google Gemini");
-    assert.deepEqual([...agent.sources].sort(), [officialUrl, courseUrl, searchSource].sort());
+    assert.deepEqual([...agent.sources].sort(), [officialUrl, courseUrl, courseDetailUrl, searchSource].sort());
     assert.equal(agent.directPages.find((page: any) => page.kind === "tabelog-store")?.status, "unavailable");
     assert.match(agent.directPages.find((page: any) => page.kind === "tabelog-courses")?.text ?? "", /全6品[\s\S]*全8品/);
     const synthesis = buildSynthesisPrompt(input, [agent]);
     assert.match(synthesis, /Bコース 全6品[\s\S]*全8品/);
+    assert.match(synthesis, /コース内容：詳細ページ専用の記録/);
     assert.match(synthesis, /貸切は人数とご予算に応じてご相談/);
   } finally {
     globalThis.fetch = previousFetch;
