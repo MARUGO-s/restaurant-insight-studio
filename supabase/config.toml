@@ -6,3 +6,7 @@ verify_jwt = true
 # Validates a short-lived, single-use dispatch token through a service-only DB claim.
 [functions.restaurant-analysis-worker]
 verify_jwt = false
+
+# This endpoint authorizes one report with its owner-issued capability token.
+[functions.restaurant-report-share]
+verify_jwt = false

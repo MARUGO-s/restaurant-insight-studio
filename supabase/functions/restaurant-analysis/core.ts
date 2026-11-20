@@ -5,6 +5,7 @@ import { validateReportIntegrity } from "./report-integrity.ts";
 import { recoverClaimQuotations } from "./claim-quotation-recovery.ts";
 import { type DirectPage, directPageEvidence, directPageReceipts, loadDirectPages, verifyTabelogCourseSources } from "./direct-pages.ts";
 import { googleMapsPlacePath } from "./google-maps-profile.ts";
+import { newReportShareToken } from "../_shared/report-share-token.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
@@ -1192,6 +1193,15 @@ const reportIdFor = (value: unknown) => {
   if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw new Error("レポートIDを確認してください");
   return value;
 };
+const reportShareActions = new Map([
+  ["report_share_status", "status"], ["create_report_share", "create"], ["revoke_report_share", "revoke"],
+]);
+async function manageReportShare(admin: any, userId: string, input: any, action: string) {
+  return await rpc(admin, "restaurant_insight_manage_report_share", {
+    p_user_id: userId, p_report_id: reportIdFor(input.reportId), p_action: action,
+    p_token: action === "create" ? newReportShareToken() : null,
+  }) as { token: string | null } | null;
+}
 async function fullReport(db: any, userId: string, row: any) {
   const { data, error } = await db.from("restaurant_insight_followups").select("*").eq("user_id", userId).eq("report_id", row.id).order("created_at", { ascending: true });
   if (error) throw error;
@@ -1253,6 +1263,11 @@ export async function handleApi(req: Request) {
     if (authError || !auth.user) return json({ error: "ログインし直してください" }, 401);
     const input = await req.json();
     const userId = auth.user.id;
+    const shareAction = reportShareActions.get(input.action);
+    if (shareAction) {
+      const share = await manageReportShare(serviceDb(), userId, input, shareAction);
+      return share ? json({ token: share.token }) : json({ error: "レポートが見つかりません。" }, 404);
+    }
     if (input.action === "health") return json({ configured: { openai: !!env("OPENAI_API_KEY"), gemini: !!env("GEMINI_API_KEY"), xai: !!env("XAI_API_KEY") } });
     if (input.action === "active_run") {
       const { data: run, error } = await db.from("restaurant_insight_runs").select("id,started_at,input").eq("user_id", userId).eq("status", "running").order("started_at", { ascending: false }).limit(1).maybeSingle();

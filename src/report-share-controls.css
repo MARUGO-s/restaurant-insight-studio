@@ -1,0 +1,10 @@
+.report-share-dialog h2 { margin-top: 0; }
+.report-share-dialog .report-share-status { color: #405835; margin: 0 0 14px; }
+.report-share-dialog .report-share-error { color: #8a3f35; margin: 0 0 14px; }
+.report-share-dialog .delete-dialog-actions { margin-top: 20px; flex-wrap: wrap; }
+.report-share-dialog .primary-button { width: auto; margin: 0; padding: 10px 14px; }
+.report-share-link { display: grid; gap: 8px; }
+.report-share-link label { font-size: 13px; font-weight: 650; }
+.report-share-link input { width: 100%; min-width: 0; padding: 9px 10px; color: #314532; background: #f6f8f3; border: 1px solid #dce5d7; border-radius: 6px; font: inherit; }
+.report-share-link-actions { display: flex; gap: 8px 14px; align-items: center; flex-wrap: wrap; }
+.report-share-link-actions a { color: #405835; font-size: 13px; text-decoration: underline; }

@@ -218,6 +218,25 @@ for(const html of [actual,modernHtml,reviewedHtml,scopedHtml]) {
   assert.equal(new Set(ids).size,ids.length,'anchors are unique');
   for(const [,id] of html.matchAll(/href="#([^"]+)"/g)) assert(ids.includes(id),`anchor ${id} resolves`);
 }
+// The outside viewer renders the integrated document away from the signed-in app.
+const sharedModule=new (require('module').Module)(root+'/src/SharedReportView.check.cjs');
+sharedModule.filename=root+'/src/SharedReportView.check.cjs';
+sharedModule.paths=moduleObject.paths;
+sharedModule.require=id=>id==='./ReportView'?moduleObject.exports:req(id);
+sharedModule._compile(ts.transpileModule(fs.readFileSync(root+'/src/SharedReportView.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,sharedModule.filename);
+const {SharedReportDocument,SharedReportPage,shareTokenFromFragment}=sharedModule.exports;
+const shareToken='a'.repeat(64);
+assert.equal(shareTokenFromFragment(`#${shareToken}`),shareToken);
+for(const fragment of ['', '#report-details', `#${shareToken}/extra`, `#${shareToken.toUpperCase()}`]) assert.equal(shareTokenFromFragment(fragment),null);
+const { originalProductInventory, claimReviews: internalClaims, ...sharedFixture }=productReferences;
+const sharedHtml=render(SharedReportDocument,{data:{storeName:'閲覧用ビストロ <script>',createdAt:'2026-11-20T05:00:00Z',report:JSON.stringify(sharedFixture),reportSources:['https://example.com/courses/M4']}});
+assert(sharedHtml.includes('閲覧用ビストロ &lt;script&gt;')&&sharedHtml.includes('2026年11月20日 14:00'));
+assert(sharedHtml.includes(`<p>M2（${breadCourse}）・M４（${pairingCourse}）の承認原稿`));
+assert(sharedHtml.includes('href="https://example.com/courses/M4"')&&sharedHtml.includes('href="#report-details"'));
+for(const label of ['ログイン','API料金','ゴミ箱','専門AIの原調査','訂正前の名称']) assert(!sharedHtml.includes(label),label);
+assert(render(SharedReportPage,{baseUrl:'https://example.com',token:null}).includes('この共有リンクではレポートを閲覧できません。'));
+const shareEntry=fs.readFileSync(root+'/report.html','utf8');
+assert(shareEntry.includes('content="no-referrer"')&&shareEntry.includes('content="noindex, nofollow, noarchive"'));
 const htmlFlag=process.argv.indexOf('--html-dir');
 if(htmlFlag>=0){
 const htmlDir=path.resolve(process.argv[htmlFlag+1]);fs.mkdirSync(htmlDir,{recursive:true});

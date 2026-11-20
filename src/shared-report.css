@@ -1,0 +1,19 @@
+.shared-report-body { min-width: 0; }
+.shared-report {
+  width: min(100%, 1160px);
+  margin-inline: auto;
+  padding: clamp(16px, 4vw, 48px);
+}
+.shared-report-header { margin-bottom: 24px; padding: 0 4px; }
+.shared-report-header p { margin: 0 0 6px; color: #52644f; font-weight: 700; }
+.shared-report-header h1 { margin: 0 0 8px; font-size: clamp(24px, 4vw, 38px); overflow-wrap: anywhere; }
+.shared-report-header time { color: #586459; }
+.shared-report [id^="report-"] { scroll-margin-top: 24px; }
+.shared-report-message { max-width: 700px; }
+.shared-report-message h1 { font-size: 24px; }
+.shared-report-message p { line-height: 1.7; }
+.shared-report-message button { padding: 8px 14px; background: #fff; color: #344a3b; border: 1px solid #acb7a7; border-radius: 6px; }
+@media print {
+  .shared-report { width: 100%; padding: 0; }
+  .shared-report-message button { display: none; }
+}
