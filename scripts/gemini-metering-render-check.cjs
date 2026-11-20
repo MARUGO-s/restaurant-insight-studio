@@ -15,6 +15,7 @@ const browserModules = {
   "./lib/supabase": { supabase: new Proxy({}, { get: noNetwork }) },
   "./StoreNameInput": {},
   "./ReportView": {},
+  "./ReportShareControls": {},
   "./ReportTrash": {},
   // Keep the expected yen amounts independent of the latest published exchange rate.
   "./boj-usd-jpy.json": {
