@@ -10,6 +10,7 @@ const selectedTabelog = [{ id: "tabelog", name: "食べログ", url: storeUrl }]
 const renderer = { accountId: "abcdef0123456789abcdef0123456789", token: "browser-test-token" };
 const scrapeUrl = `https://api.cloudflare.com/client/v4/accounts/${renderer.accountId}/browser-rendering/scrape?cacheTTL=0`;
 const displayedCourse = "Bコース 全6品\n前菜からデザートまで全8品をご用意します。\n8,800円\n2名様から";
+const browserPageTitle = "ビストロ サヴァサヴァ 掲載情報";
 
 function htmlResponse(content: string, title: string) {
   const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${title}</title></head><body>${content}</body></html>`;
@@ -71,13 +72,16 @@ function renderedPage(
   elements: string[],
   body = elements.join("\n"),
   redirectChain?: { url: string; status: number; headers: { location: string } }[],
+  titleSelector: "title" | "h1" = "title",
 ) {
   return Response.json({
     success: true,
-    meta: { finalUrl: url, status: 200, title: "ビストロ サヴァサヴァ 掲載情報", redirectChain },
+    meta: { finalUrl: url, status: 200, title: "", redirectChain },
     result: [
       { selector: "body", results: [{ text: body, width: 800, height: 100 }] },
       ...(selector === "body" ? [] : [{ selector, results: elements.map(text => ({ text, width: 400, height: 100 })) }]),
+      { selector: "title", results: [{ text: titleSelector === "title" ? browserPageTitle : "", width: 0, height: 0 }] },
+      { selector: "h1", results: titleSelector === "h1" ? [{ text: browserPageTitle, width: 400, height: 40 }] : [] },
     ],
   });
 }
@@ -93,8 +97,10 @@ function browserFetch(direct: ReturnType<typeof directFetch>, render: (url: stri
     assert.ok(options?.signal instanceof AbortSignal);
     const request = JSON.parse(String(options?.body));
     assert.ok(direct.calls.includes(request.url), "a known page must be tried directly before opening a browser");
-    assert.deepEqual(request.elements.map((element: { selector: string }) => element.selector), request.url === courseUrl
-      ? ["body", ".rstdtl-course-list"] : request.url === storeUrl ? ["body", ".rstinfo-table tr"] : ["body"]);
+    const selector = request.url === courseUrl ? ".rstdtl-course-list" : request.url === storeUrl ? ".rstinfo-table tr" : "body";
+    const contentSelectors = selector === "body" ? ["body"] : ["body", selector];
+    assert.deepEqual(request.elements.map((element: { selector: string }) => element.selector), [...contentSelectors, "title", "h1"]);
+    assert.equal(request.waitForSelector.selector, selector);
     const patterns = request.allowRequestPattern.map((value: string) => new RegExp(value));
     const allowed = (value: string) => patterns.some((pattern: RegExp) => pattern.test(value));
     assert.equal(allowed(request.url), true);
@@ -260,6 +266,7 @@ Deno.test("browser fallback opens only failed direct targets and records the URL
   assert.equal(page?.status, "retrieved");
   assert.equal(page?.method, "browser");
   assert.equal(page?.url, courseUrl);
+  assert.equal(page?.title, browserPageTitle, "a nonvisible document title works with empty provider metadata");
   assert.match(page?.text ?? "", /全6品[\s\S]*全8品[\s\S]*8,800円[\s\S]*2名様から/);
   assert.doesNotMatch(page?.text ?? "", /99,999円/);
   const checkedAt = Date.parse(page?.retrievedAt ?? "");
@@ -284,16 +291,17 @@ Deno.test("unsupported or unselected URLs never start a browser search", async (
   assert.deepEqual(browser.calls, []);
 });
 
-Deno.test("browser fallback keeps the final validated official alias as its source URL", async () => {
+Deno.test("browser fallback keeps the final validated official alias and a visible heading when its document title is empty", async () => {
   const direct = directFetch({ [officialUrl]: () => new Response(null, { status: 503 }) });
   const browser = browserFetch(direct, () => renderedPage(officialAlias, "body", [],
-    "ビストロ サヴァサヴァのお知らせ。営業時間は18時から22時です。火曜日は定休日です。貸切は人数とご予算に応じてご相談ください。ご予約は店舗にお問い合わせください。",
-    [{ url: officialUrl, status: 301, headers: { location: officialAlias } }]));
+    browserPageTitle + "\n営業時間は18時から22時です。火曜日は定休日です。貸切は人数とご予算に応じてご相談ください。ご予約は店舗にお問い合わせください。",
+    [{ url: officialUrl, status: 301, headers: { location: officialAlias } }], "h1"));
   const [page] = await loadDirectPages(officialUrl, [], browser.get, [], renderer);
   assert.deepEqual(browser.calls, [officialUrl]);
   assert.equal(page.status, "retrieved");
   assert.equal(page.method, "browser");
   assert.equal(page.url, officialAlias);
+  assert.equal(page.title, browserPageTitle);
   assert.match(page.text ?? "", /貸切は人数とご予算に応じてご相談/);
 });
 

@@ -18,6 +18,7 @@ const MAX_HTML_BYTES = 2 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const PAGE_DEADLINE_MS = 12_000;
 const BROWSER_DEADLINE_MS = 20_000;
+const BROWSER_REQUEST_INTERVAL_MS = 10_100;
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
 const TABLELOG_ROUTE = /^\/[a-z][a-z0-9-]*\/A\d{4}\/A\d{6}\/\d{8}(?=\/(?:party\/)?$)/;
 
@@ -143,10 +144,13 @@ type BrowserResult = {
   result?: { selector: string; results: { text: string; height: number; width: number }[] }[];
 };
 
-function visibleText(result: BrowserResult, selector: string) {
+function scrapedElements(result: BrowserResult, selector: string) {
   const group = result.result?.find((entry) => entry?.selector === selector);
-  return Array.isArray(group?.results) ? group.results
-    .filter((entry) => entry && typeof entry.text === "string" && entry.height > 0 && entry.width > 0).map((entry) => entry.text) : [];
+  return Array.isArray(group?.results) ? group.results.filter((entry) => entry && typeof entry.text === "string") : [];
+}
+
+function visibleText(result: BrowserResult, selector: string) {
+  return scrapedElements(result, selector).filter((entry) => entry.height > 0 && entry.width > 0).map((entry) => entry.text);
 }
 
 function allowedBrowserRedirects(kind: DirectPageKind, initial: URL, chain: NonNullable<BrowserResult["meta"]>["redirectChain"]) {
@@ -173,7 +177,7 @@ async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRu
       headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         url,
-        elements: selectors.map((selector) => ({ selector })),
+        elements: [...selectors, "title", "h1"].map((selector) => ({ selector })),
         allowRequestPattern,
         rejectResourceTypes: ["media", "font", "ping", "websocket", "eventsource"],
         gotoOptions: { waitUntil: "networkidle2", timeout: 12_000 },
@@ -195,9 +199,12 @@ async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRu
     if (typeof meta?.status !== "number" || meta.status < 200 || meta.status >= 300) {
       return unavailable(typeof meta?.status === "number" ? `ページがHTTP ${meta.status}を返しました` : "ページの応答を確認できませんでした");
     }
-    if (!Array.isArray(result.result) || typeof meta.title !== "string") return unavailable("表示本文を受け取れませんでした");
+    if (!Array.isArray(result.result)) return unavailable("表示本文を受け取れませんでした");
+    // The service can leave meta.title empty even when the page rendered.
+    const title = [meta.title, ...scrapedElements(result, "title").map((entry) => entry.text), ...visibleText(result, "h1")]
+      .find((value): value is string => typeof value === "string" && !!value.trim());
     const [body] = visibleText(result, "body");
-    const excerpt = body && extractRenderedDirectPage(kind, meta.title, body, selectors.length > 1 ? visibleText(result, selectors[1]) : []);
+    const excerpt = title && body && extractRenderedDirectPage(kind, title, body, selectors.length > 1 ? visibleText(result, selectors[1]) : []);
     if (!excerpt) return unavailable("店舗情報として読める表示本文が見つかりませんでした");
     final.hash = "";
     return { kind, url: final.href, status: "retrieved", method: "browser", retrievedAt: new Date().toISOString(), ...excerpt };
@@ -207,7 +214,7 @@ async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRu
   }
 }
 
-export function loadDirectPages(storeUrl: string, selectedSites: { id: string; url: string }[], get: typeof fetch = fetch, saved: DirectPage[] = [], renderer?: BrowserRunConfig) {
+export async function loadDirectPages(storeUrl: string, selectedSites: { id: string; url: string }[], get: typeof fetch = fetch, saved: DirectPage[] = [], renderer?: BrowserRunConfig) {
   const browser = renderer && browserRunConfig(renderer.accountId, renderer.token);
   const official = httpsUrl(storeUrl);
   const catalogUrl = official && officialPages.get(officialIdentity(official));
@@ -219,7 +226,7 @@ export function loadDirectPages(storeUrl: string, selectedSites: { id: string; u
       const source = httpsUrl(page.url);
       return samePage(kind, base, source);
     });
-    return prior ?? fetchPage(kind, url, get).then((page) => page.status === "unavailable" && browser ? renderPage(page, get, browser) : page);
+    return prior ?? fetchPage(kind, url, get);
   };
   const pages: (DirectPage | Promise<DirectPage>)[] = [catalogUrl ? load("official", catalogUrl)
     : searchOnly("official", storeUrl, "登録外の公式URLは検索で確認します")];
@@ -234,7 +241,17 @@ export function loadDirectPages(storeUrl: string, selectedSites: { id: string; u
       pages.push(searchOnly("tabelog-store", tabelog.url, reason), searchOnly("tabelog-courses", "", reason));
     }
   }
-  return Promise.all(pages);
+  const results = await Promise.all(pages);
+  if (!browser) return results;
+  let requestIndex = 0;
+  return Promise.all(results.map(async (page) => {
+    if (page.status !== "unavailable") return page;
+    // Browser Run Free permits one Quick Actions request every ten seconds.
+    // Space request starts while allowing the requests themselves to overlap.
+    const wait = BROWSER_REQUEST_INTERVAL_MS * requestIndex++;
+    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+    return renderPage(page, get, browser);
+  }));
 }
 
 export function directPageReceipts(pages: DirectPage[]): DirectPageReceipt[] {
