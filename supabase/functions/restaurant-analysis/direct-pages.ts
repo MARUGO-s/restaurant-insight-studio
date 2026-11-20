@@ -23,8 +23,10 @@ const BROWSER_DEADLINE_MS = 20_000;
 const BROWSER_COOLDOWN_MS = 10_100;
 // Preserve 300s for Gemini and 10s for DB operations within the 360s job lease.
 const PAGE_COLLECTION_BUDGET_MS = 50_000;
+const monotonicNow = globalThis.performance?.now?.bind(globalThis.performance);
+const wallClockOrigin = Date.now() - (monotonicNow?.() ?? 0);
 const browserTiming: BrowserTiming = {
-  now: () => performance.timeOrigin + performance.now(),
+  now: monotonicNow ? () => wallClockOrigin + monotonicNow() : Date.now,
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
