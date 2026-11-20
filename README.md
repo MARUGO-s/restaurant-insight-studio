@@ -50,6 +50,8 @@ pg_netの`net`スキーマはData APIに公開しないでください。2026-10
 
 ブラウザー取得を有効にするには、SupabaseのEdge Function Secretsに `RESTAURANT_BROWSER_ACCOUNT_ID` と `RESTAURANT_BROWSER_API_TOKEN` を登録します。[Cloudflare Browser Run](https://developers.cloudflare.com/browser-run/quick-actions/scrape-endpoint/) の対象アカウントと、対象アカウントのBrowser Run編集権限に限定したAPIトークンを使用します。実行サービスへ送るのは直接取得に失敗した公開ページのURLと抽出設定です。解析の入力内容や利用者のセッションは送りません。値のない環境では既存の直接取得と検索が動きます。
 
+同じ解析で複数ページをブラウザーで確認するときは、前の取得を処理し終えてから10.1秒以上空けます。Browser Runが一時的なHTTP 429を返したページは、10.1秒と `Retry-After` の指定のうち長い方を待って1回再試行します。日次上限に達した場合や、指定の待ち時間が今回の取得時間内に収まらない場合は、取得状況を記録して検索で補足します。
+
 「API料金」の「Gemini接続確認」から、調査と同じキー・モデルの応答を確認できます。短い診断リクエストも料金明細へ記録し、Googleが返した利用枠の指標・上限・対象モデル等を表示します。キー本体は返さず、末尾だけでAI Studioのキーと照合できます。
 
 ## 長時間調査

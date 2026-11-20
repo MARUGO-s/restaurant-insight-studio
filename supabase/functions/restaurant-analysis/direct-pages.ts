@@ -13,12 +13,20 @@ export type DirectPageReceipt = {
 };
 export type DirectPage = DirectPageReceipt & { text?: string };
 type BrowserRunConfig = { accountId: string; token: string };
+type BrowserTiming = { now: () => number; sleep: (milliseconds: number) => Promise<void> };
+type BrowserRateLimit = { waitMs: number; reason: string };
 
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const PAGE_DEADLINE_MS = 12_000;
 const BROWSER_DEADLINE_MS = 20_000;
-const BROWSER_REQUEST_INTERVAL_MS = 10_100;
+const BROWSER_COOLDOWN_MS = 10_100;
+// Preserve 300s for Gemini and 10s for DB operations within the 360s job lease.
+const PAGE_COLLECTION_BUDGET_MS = 50_000;
+const browserTiming: BrowserTiming = {
+  now: () => performance.timeOrigin + performance.now(),
+  sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+};
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
 const TABLELOG_ROUTE = /^\/[a-z][a-z0-9-]*\/A\d{4}\/A\d{6}\/\d{8}(?=\/(?:party\/)?$)/;
 
@@ -60,8 +68,8 @@ function discardBody(response: Response) {
   void response.body?.cancel().catch(() => {});
 }
 
-async function readBoundedText(response: Response, contentType: string) {
-  if (Number(response.headers.get("content-length")) > MAX_HTML_BYTES) {
+async function readBoundedText(response: Response, contentType: string, maxBytes = MAX_HTML_BYTES) {
+  if (Number(response.headers.get("content-length")) > maxBytes) {
     discardBody(response);
     throw new Error("ページが取得上限を超えました");
   }
@@ -79,7 +87,7 @@ async function readBoundedText(response: Response, contentType: string) {
       const { done, value } = await reader.read();
       if (done) return html + decoder.decode();
       bytes += value.byteLength;
-      if (bytes > MAX_HTML_BYTES) {
+      if (bytes > maxBytes) {
         void reader.cancel().catch(() => {});
         throw new Error("ページが取得上限を超えました");
       }
@@ -162,11 +170,29 @@ function allowedBrowserRedirects(kind: DirectPageKind, initial: URL, chain: NonN
   }));
 }
 
-async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRunConfig): Promise<DirectPage> {
+function browserUnavailable(page: DirectPage, reason: string): DirectPage {
+  return { ...page, reason: `${page.reason ?? "直接取得できませんでした"}。ブラウザー取得: ${reason}` };
+}
+
+async function browserRateLimit(response: Response, now: () => number): Promise<BrowserRateLimit> {
+  const retryAfter = response.headers.get("retry-after")?.trim() ?? "";
+  const requestedWait = /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - now();
+  // Daily quota and temporary request throttling both return 429.
+  const body = await readBoundedText(response, "application/json", 8_192).catch(() => "");
+  if (/browser time limit exceeded for today/i.test(body)) {
+    return { waitMs: Infinity, reason: "実行サービスがHTTP 429を返しました（1日の利用上限に達しました）" };
+  }
+  return {
+    waitMs: Math.max(BROWSER_COOLDOWN_MS, Number.isNaN(requestedWait) ? 0 : requestedWait),
+    reason: "実行サービスがHTTP 429を返しました",
+  };
+}
+
+async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRunConfig, timeoutMs: number, now: () => number): Promise<DirectPage | BrowserRateLimit> {
   const { kind, url } = page;
   const initial = new URL(url);
-  const signal = AbortSignal.timeout(BROWSER_DEADLINE_MS);
-  const unavailable = (reason: string) => ({ ...page, reason: `${page.reason ?? "直接取得できませんでした"}。ブラウザー取得: ${reason}` });
+  const signal = AbortSignal.timeout(timeoutMs);
+  const unavailable = (reason: string) => browserUnavailable(page, reason);
   const selectors = renderedPageSelectors(kind);
   const hostname = initial.hostname.replace(/^www\./, "").replace(/\./g, "\\.");
   const allowRequestPattern = [`^https://(?:www\\.)?${hostname}/`];
@@ -185,6 +211,7 @@ async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRu
         actionTimeout: 5_000,
       }),
     });
+    if (response.status === 429) return await browserRateLimit(response, now);
     if (!response.ok) {
       discardBody(response);
       return unavailable(`実行サービスがHTTP ${response.status}を返しました`);
@@ -214,7 +241,11 @@ async function renderPage(page: DirectPage, get: typeof fetch, config: BrowserRu
   }
 }
 
-export async function loadDirectPages(storeUrl: string, selectedSites: { id: string; url: string }[], get: typeof fetch = fetch, saved: DirectPage[] = [], renderer?: BrowserRunConfig) {
+export async function loadDirectPages(
+  storeUrl: string, selectedSites: { id: string; url: string }[], get: typeof fetch = fetch, saved: DirectPage[] = [],
+  renderer?: BrowserRunConfig, timing = browserTiming,
+) {
+  const deadline = timing.now() + PAGE_COLLECTION_BUDGET_MS;
   const browser = renderer && browserRunConfig(renderer.accountId, renderer.token);
   const official = httpsUrl(storeUrl);
   const catalogUrl = official && officialPages.get(officialIdentity(official));
@@ -243,15 +274,35 @@ export async function loadDirectPages(storeUrl: string, selectedSites: { id: str
   }
   const results = await Promise.all(pages);
   if (!browser) return results;
-  let requestIndex = 0;
-  return Promise.all(results.map(async (page) => {
-    if (page.status !== "unavailable") return page;
-    // Browser Run Free permits one Quick Actions request every ten seconds.
-    // Space request starts while allowing the requests themselves to overlap.
-    const wait = BROWSER_REQUEST_INTERVAL_MS * requestIndex++;
-    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
-    return renderPage(page, get, browser);
-  }));
+  let nextBrowserAt = 0;
+  let lastLimit: BrowserRateLimit | undefined;
+  for (const [index, page] of results.entries()) {
+    if (page.status !== "unavailable") continue;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const now = timing.now();
+      const wait = Math.max(0, nextBrowserAt - now);
+      if (now + wait < deadline && wait > 0) await timing.sleep(wait);
+      const remainingMs = Math.floor(deadline - timing.now());
+      if (now + wait >= deadline || remainingMs <= 0) {
+        const reason = lastLimit?.waitMs === Infinity ? lastLimit.reason : [
+          lastLimit?.reason, "今回の取得時間内にブラウザーで確認できませんでした",
+        ].filter(Boolean).join("。");
+        results[index] = browserUnavailable(page, reason);
+        break;
+      }
+      const outcome = await renderPage(page, get, browser, Math.min(BROWSER_DEADLINE_MS, remainingMs), timing.now);
+      lastLimit = "waitMs" in outcome ? outcome : undefined;
+      // Start the cooldown after the response has been handled.
+      nextBrowserAt = timing.now() + (lastLimit?.waitMs ?? BROWSER_COOLDOWN_MS);
+      if ("waitMs" in outcome) {
+        results[index] = browserUnavailable(page, attempt === 0 ? outcome.reason : `${outcome.reason}（再試行後）`);
+        continue;
+      }
+      results[index] = outcome;
+      break;
+    }
+  }
+  return results;
 }
 
 export function directPageReceipts(pages: DirectPage[]): DirectPageReceipt[] {

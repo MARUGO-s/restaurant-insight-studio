@@ -112,6 +112,29 @@ function browserFetch(direct: ReturnType<typeof directFetch>, render: (url: stri
   return { calls, get };
 }
 
+function browserClock() {
+  let timestamp = Date.UTC(2026, 10, 20, 0, 0, 0);
+  const waits: number[] = [];
+  return {
+    now: () => timestamp,
+    advance(ms: number) { timestamp += ms; },
+    sleep(ms: number) { waits.push(ms); timestamp += ms; return Promise.resolve(); },
+    waits,
+  };
+}
+
+function browserRateLimit(retryAfter?: string, message = "Too many requests") {
+  return Response.json({ success: false, errors: [{ message }] }, {
+    status: 429, headers: retryAfter === undefined ? {} : { "Retry-After": retryAfter },
+  });
+}
+
+function renderedStorefront() {
+  return renderedPage(storeUrl, ".rstinfo-table tr", [
+    "店名\tビストロ サヴァサヴァ", "住所\t東京都新宿区荒木町", "貸切\t不可",
+  ]);
+}
+
 Deno.test("direct retrieval hands separate official, Tabelog storefront, and course text to the caller", async () => {
   const { calls, get } = directFetch({
     [officialUrl]: () => Response.redirect(officialAlias),
@@ -313,17 +336,17 @@ Deno.test("browser fallback failures preserve the original direct failure and co
       { url: courseUrl, status: 302, headers: { location: "https://example.test/other-page" } },
     ]),
     () => renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse], "ページを読み込めません"),
-    async () => {
+    ...[403, 429].map((status) => async () => {
       const page = await renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse]).json();
-      return Response.json({ ...page, meta: { ...page.meta, status: 403 } });
-    },
+      return Response.json({ ...page, meta: { ...page.meta, status } });
+    }),
     () => new Response(null, { status: 403 }),
     () => Promise.reject(new DOMException("test deadline", "TimeoutError")),
   ];
   for (const render of cases) {
     const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: storefrontPage, [courseUrl]: () => new Response(null, { status: 503 }) });
     const browser = browserFetch(direct, render);
-    const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer);
+    const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, browserClock());
     const courses = pages.find(item => item.kind === "tabelog-courses");
     assert.deepEqual(browser.calls, [courseUrl]);
     assert.equal(courses?.status, "unavailable");
@@ -351,6 +374,124 @@ Deno.test("a successful browser result is reused on retry only for the same page
   assert.deepEqual(changed.calls, [courseUrl]);
   assert.equal(reloaded.find(item => item.kind === "tabelog-courses")?.status, "retrieved");
   assert.notEqual(reloaded.find(item => item.kind === "tabelog-courses")?.method, "browser");
+});
+
+Deno.test("browser fallback waits until the previous response body finishes before spacing the next request", async () => {
+  const unavailable = () => new Response(null, { status: 503 });
+  const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: unavailable, [courseUrl]: unavailable });
+  const timing = browserClock();
+  const starts: number[] = [];
+  let firstFinishedAt = 0;
+  const readGate = Promise.withResolvers<void>();
+  const firstBody = new TextEncoder().encode(await renderedStorefront().text());
+  const response = new Response(new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await readGate.promise;
+      firstFinishedAt = timing.now();
+      controller.enqueue(firstBody);
+      controller.close();
+    },
+  }), { headers: { "Content-Type": "application/json" } });
+  const browser = browserFetch(direct, (url) => {
+    starts.push(timing.now());
+    return url === storeUrl ? response : renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse]);
+  });
+  const load = loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, timing);
+  try {
+    // All fake direct requests settle before this turn while the browser body is still pending.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(browser.calls, [storeUrl]);
+    assert.deepEqual(timing.waits, []);
+    timing.advance(16_000);
+  } finally {
+    readGate.resolve();
+  }
+  const pages = await load;
+  assert.deepEqual(browser.calls, [storeUrl, courseUrl]);
+  assert.deepEqual(direct.calls.sort(), [officialUrl, storeUrl, courseUrl].sort());
+  assert.equal(starts[1] - firstFinishedAt, 10_100);
+  assert.ok(pages.every((page) => page.status === "retrieved"));
+  assert.notEqual(pages.find((page) => page.url === officialUrl)?.method, "browser");
+});
+
+Deno.test("provider 429 retries once after the greater of Retry-After and the minimum gap", async () => {
+  const examples = [
+    { label: "numeric delay", retryAfter: () => "17", wait: 17_000 },
+    { label: "HTTP date", retryAfter: (finishedAt: number) => new Date(finishedAt + 21_000).toUTCString(), wait: 21_000 },
+    { label: "below minimum", retryAfter: () => "3", wait: 10_100 },
+    { label: "invalid", retryAfter: () => "invalid", wait: 10_100 },
+    { label: "absent", retryAfter: () => undefined, wait: 10_100 },
+  ];
+  for (const { label, retryAfter, wait } of examples) {
+    const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: storefrontPage, [courseUrl]: () => new Response(null, { status: 503 }) });
+    const timing = browserClock();
+    const starts: number[] = [];
+    let firstFinishedAt = 0;
+    const browser = browserFetch(direct, () => {
+      starts.push(timing.now());
+      timing.advance(2_000);
+      if (starts.length !== 1) return renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse]);
+      firstFinishedAt = timing.now();
+      return browserRateLimit(retryAfter(firstFinishedAt));
+    });
+    const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, timing);
+    assert.deepEqual(browser.calls, [courseUrl, courseUrl], label);
+    assert.deepEqual(direct.calls.sort(), [officialUrl, storeUrl, courseUrl].sort(), label);
+    assert.equal(starts[1] - firstFinishedAt, wait, label);
+    const course = pages.find((page) => page.url === courseUrl);
+    assert.equal(course?.method, "browser", label);
+    assert.equal(course?.status, "retrieved", label);
+    assert.match(course?.text ?? "", /全6品[\s\S]*全8品/, label);
+  }
+});
+
+Deno.test("repeated browser rate limits stop after one retry and retain the direct failure", async () => {
+  const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: storefrontPage, [courseUrl]: () => new Response(null, { status: 503 }) });
+  const timing = browserClock();
+  const browser = browserFetch(direct, () => new Response(null, { status: 429 }));
+  const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, timing);
+  assert.deepEqual(browser.calls, [courseUrl, courseUrl]);
+  assert.deepEqual(timing.waits, [10_100]);
+  const course = pages.find((page) => page.url === courseUrl);
+  assert.equal(course?.status, "unavailable");
+  assert.match(course?.reason ?? "", /HTTP 503/);
+  assert.match(course?.reason ?? "", /HTTP 429/);
+  assert.equal(course?.text, undefined);
+});
+
+Deno.test("a retry delay past the remaining budget also stops later browser pages", async () => {
+  const unavailable = () => new Response(null, { status: 503 });
+  const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: unavailable, [courseUrl]: unavailable });
+  const timing = browserClock();
+  let attempts = 0;
+  const browser = browserFetch(direct, () => browserRateLimit(++attempts === 1 ? undefined : "3600"));
+  const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, timing);
+  assert.deepEqual(browser.calls, [storeUrl, storeUrl]);
+  assert.deepEqual(timing.waits, [10_100]);
+  assert.equal(pages.find((page) => page.url === officialUrl)?.status, "retrieved");
+  for (const page of pages.filter((page) => page.url !== officialUrl)) {
+    assert.equal(page.status, "unavailable");
+    assert.match(page.reason ?? "", /HTTP 503/);
+    assert.match(page.reason ?? "", /ブラウザ/);
+    assert.equal(page.text, undefined);
+  }
+});
+
+Deno.test("a provider daily browser-time quota skips retries and remaining browser pages", async () => {
+  const unavailable = () => new Response(null, { status: 503 });
+  const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: unavailable, [courseUrl]: unavailable });
+  const timing = browserClock();
+  const browser = browserFetch(direct, () => browserRateLimit(undefined, "Browser time limit exceeded for today"));
+  const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer, timing);
+  assert.deepEqual(browser.calls, [storeUrl]);
+  assert.deepEqual(timing.waits, []);
+  assert.equal(pages.find((page) => page.url === officialUrl)?.status, "retrieved");
+  for (const page of pages.filter((page) => page.url !== officialUrl)) {
+    assert.equal(page.status, "unavailable");
+    assert.match(page.reason ?? "", /HTTP 503/);
+    assert.match(page.reason ?? "", /上限|利用枠/);
+    assert.equal(page.text, undefined);
+  }
 });
 
 function gourmetDatabase() {
@@ -450,9 +591,7 @@ Deno.test("the gourmet worker checkpoints browser evidence before sending its te
   const savedEnv = Object.keys(testEnv).map(name => [name, Deno.env.get(name)] as const);
   const { db, checkpoints, outputs } = gourmetDatabase();
   const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: () => new Response(null, { status: 503 }), [courseUrl]: coursesPage });
-  const browser = browserFetch(direct, () => renderedPage(storeUrl, ".rstinfo-table tr", [
-    "店名\tビストロ サヴァサヴァ", "住所\t東京都新宿区荒木町", "貸切\t不可",
-  ]));
+  const browser = browserFetch(direct, renderedStorefront);
   const input = { storeName: "BistroCAVACAVA", storeUrl: officialUrl, groupName: null, selectedSites: selectedTabelog };
   const requests: string[] = [];
   globalThis.fetch = async (target, options) => {
