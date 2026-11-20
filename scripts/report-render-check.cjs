@@ -100,6 +100,27 @@ assert(reviewedHtml.includes('未確認・採用しなかった商品情報'));
 const originalDetails=reviewedHtml.match(/<details class="sources-block"><summary>専門調査の商品原記録[\s\S]*?<\/details>/)?.[0] || '';
 assert(originalDetails.includes('原記録だけのコース')&&originalDetails.includes('誤分類された媒体'),'raw inventory remains in a separate collapsed disclosure');
 assert(!reviewedHtml.replace(originalDetails,'').includes('誤分類された媒体'));
+// A saved report can refer to product IDs before the inventory is on screen.
+const breadCourse='【11月】Bコース6品 自家製パン付き';
+const pairingCourse='【11月】Bコース6品 ワインペアリング6杯付き';
+const productReferences={...reviewed,keyMessage:'まず**M2**の表示を確認する。',actionPlan:[{
+  ...modern.actionPlan[0],action:'M2とM4を照合する',deliverable:'M2・M４の承認原稿、公開画面、翌月用ひな型',
+  reason:`[M4の掲載](https://example.com/courses/M4)／M2（${breadCourse}）を確認する。参照番号はM20とAM2。`,
+}],productInventory:[
+  {...reviewed.productInventory[0],id:'M2',name:breadCourse},
+  {...reviewed.productInventory[1],id:'M4',name:pairingCourse},
+],originalProductInventory:[{...reviewed.productInventory[0],id:'M2',name:'訂正前の名称'}]};
+const referencesHtml=render(IntegratedReport,{text:JSON.stringify(productReferences)});
+const inventoryStart=referencesHtml.indexOf('<caption>照合後の商品情報</caption>');
+assert(inventoryStart>0);
+const precedingContent=referencesHtml.slice(0,inventoryStart);
+assert(precedingContent.includes(`<strong>M2（${breadCourse}）</strong>`));
+assert(precedingContent.includes(`<b>M2（${breadCourse}）とM4（${pairingCourse}）を照合する</b>`));
+assert(precedingContent.includes(`<p>M2（${breadCourse}）・M４（${pairingCourse}）の承認原稿、公開画面、翌月用ひな型</p>`));
+assert(precedingContent.includes(`href="https://example.com/courses/M4"`));
+assert(precedingContent.includes(`>M4（${pairingCourse}）の掲載 ↗</a>／M2（${breadCourse}）を確認する。参照番号はM20とAM2。`));
+assert(!precedingContent.includes('訂正前の名称'));
+assert(referencesHtml.slice(inventoryStart).includes(`M2 · ${breadCourse}</td>`));
 // Research gaps and store verification are not store improvement priorities.
 const scopes=['research','verification','store','future','store','store','store'];
 const scoped={...reviewed,keyFindings:scopes.map((scope,i)=>({...modern.keyFindings[0],id:`SF${i}`,title:`区分課題${i}`,scope})),actionPlan:scopes.map((scope,i)=>({...modern.actionPlan[0],action:`区分施策${i}`,scope,priority:i<2?'P0':'P1',findingIds:[`SF${i}`]}))};

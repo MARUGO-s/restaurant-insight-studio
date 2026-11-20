@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 
 type DetailSection = { title: string; body: string; columns?: string[]; rows?: string[][]; sources?: string[] };
 type Finding = { scope?: string; id?: string; title: string; severity?: string; confidence?: string; issue?: string; evidence?: string; impact?: string; counterpoint?: string; verification?: string; action?: string; sources?: string[] };
@@ -13,7 +13,25 @@ const strings = (value: unknown) => Array.isArray(value) ? value.filter((item): 
 const records = (value: unknown) => Array.isArray(value) ? value.filter(isRecord) : [];
 function validUrl(value: string) { try { const url = new URL(value); return /^https?:$/.test(url.protocol) ? url : null; } catch { return null; } }
 
+const ProductNames = createContext<ReadonlyMap<string, string> | null>(null);
+const productIdPattern = /(?<![A-Za-z0-9Ａ-Ｚａ-ｚ０-９_＿])[MＭ][0-9０-９]+(?![A-Za-z0-9Ａ-Ｚａ-ｚ０-９_＿])/g;
+function showProductNames(text: string, names: ReadonlyMap<string, string> | null) {
+  if (!names?.size) return text;
+  return text.replace(productIdPattern, (id: string, offset: number) => {
+    const name = names.get(id.normalize("NFKC"));
+    if (!name) return id;
+    const before = text.slice(0, offset).replace(/[\s（(・·：:]+$/, "");
+    const after = text.slice(offset + id.length).replace(/^[\s（(・·：:]+/, "");
+    return before.endsWith(name) || after.startsWith(name) ? id : `${id}（${name}）`;
+  });
+}
+
+function ProductText({ text }: { text: string }) {
+  return showProductNames(text, useContext(ProductNames));
+}
+
 export function LinkedText({ text }: { text: string }) {
+  const names = useContext(ProductNames);
   // Empty citations from failed fetches have no link or evidence to display.
   text = text.replace(/\(\s*\[\s*\]\(\s*\)\s*\)|\[\s*\]\(\s*\)/g, "");
   // Keep Japanese separators and the explanation after a citation outside the link.
@@ -22,18 +40,18 @@ export function LinkedText({ text }: { text: string }) {
   const nodes: ReactNode[] = [];
   let cursor = 0, match: RegExpExecArray | null;
   while ((match = pattern.exec(text))) {
-    if (match.index > cursor) nodes.push(text.slice(cursor, match.index));
-    if (match[4]) nodes.push(<strong key={match.index}>{match[4]}</strong>);
+    if (match.index > cursor) nodes.push(showProductNames(text.slice(cursor, match.index), names));
+    if (match[4]) nodes.push(<strong key={match.index}>{showProductNames(match[4], names)}</strong>);
     else {
       const raw = match[2] ?? match[3];
       const href = raw.replace(/[.,;!?。、]+$/, "");
       const url = validUrl(href);
-      nodes.push(url ? <a className="inline-source" href={href} title={href} target="_blank" rel="noreferrer" key={match.index}>{match[1] || url.hostname.replace(/^www\./, "")} ↗</a> : match[0]);
+      nodes.push(url ? <a className="inline-source" href={href} title={href} target="_blank" rel="noreferrer" key={match.index}>{match[1] ? showProductNames(match[1], names) : url.hostname.replace(/^www\./, "")} ↗</a> : match[0]);
       if (href.length < raw.length) nodes.push(raw.slice(href.length));
     }
     cursor = match.index + match[0].length;
   }
-  if (cursor < text.length) nodes.push(text.slice(cursor));
+  if (cursor < text.length) nodes.push(showProductNames(text.slice(cursor), names));
   return <>{nodes}</>;
 }
 
@@ -51,7 +69,10 @@ export function SourceLinks({ sources }: { sources: string[] }) {
 }
 
 function DataTable({ columns, rows, caption }: { columns: string[]; rows: string[][]; caption?: string }) {
-  return <div className="report-table-wrap" tabIndex={0} role="region" aria-label={caption || "比較表"}><table className="report-table">{caption && <caption>{caption}</caption>}<thead><tr>{columns.map((column,index) => <th scope="col" key={index}>{column}</th>)}</tr></thead><tbody>{rows.map((row,index) => <tr key={index}>{columns.map((column,col) => <td data-label={column} key={col}><LinkedText text={row[col] || "記載なし"}/></td>)}</tr>)}</tbody></table></div>;
+  const names = useContext(ProductNames);
+  const header = columns.map((column) => showProductNames(column, names));
+  const label = caption && showProductNames(caption, names);
+  return <div className="report-table-wrap" tabIndex={0} role="region" aria-label={label || "比較表"}><table className="report-table">{label && <caption>{label}</caption>}<thead><tr>{header.map((column,index) => <th scope="col" key={index}>{column}</th>)}</tr></thead><tbody>{rows.map((row,index) => <tr key={index}>{header.map((column,col) => <td data-label={column} key={col}><LinkedText text={row[col] || "記載なし"}/></td>)}</tr>)}</tbody></table></div>;
 }
 
 const tableCells = (line: string) => line.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, "|"));
@@ -67,7 +88,7 @@ function RichBody({ text }: { text: string }) {
       while (i < lines.length && lines[i].includes("|") && !headingLine(lines[i].trim())) { rows.push(tableCells(lines[i])); i++; } i--;
       blocks.push(<DataTable columns={columns} rows={rows} key={i}/>); continue;
     }
-    if (headingLine(line)) { blocks.push(<h4 key={i}>{line.replace(/^#{1,6}\s+|^【|】$/g, "")}</h4>); continue; }
+    if (headingLine(line)) { blocks.push(<h4 key={i}><ProductText text={line.replace(/^#{1,6}\s+|^【|】$/g, "")}/></h4>); continue; }
     if (listLine(line)) {
       const ordered = /^\d/.test(line); const start = ordered ? Number.parseInt(line, 10) : undefined; const items: ReactNode[] = [];
       while (i < lines.length && listLine(lines[i].trim()) && /^\d/.test(lines[i].trim()) === ordered) {
@@ -108,9 +129,9 @@ function legacyActions(body: string) {
 
 const chapterTitle = (title: string) => title.replace(/^\d{1,2}[.．、]\s*/, "");
 function DocumentSection({ section, index, inventory }: { section: DetailSection; index: number; inventory?: ReactNode }) {
-  return <section id={`report-section-${index}`} className="report-document-section"><header><span className="chapter-number">{String(index + 1).padStart(2, "0")}</span><h3>{chapterTitle(section.title)}</h3></header><RichBody text={section.body}/>{inventory}{!!section.columns?.length && !!section.rows?.length && <DataTable columns={section.columns} rows={section.rows} caption={`${chapterTitle(section.title)}の比較・整理`}/ >}{!!section.sources?.length && <SourceLinks sources={section.sources}/>}</section>;
+  return <section id={`report-section-${index}`} className="report-document-section"><header><span className="chapter-number">{String(index + 1).padStart(2, "0")}</span><h3><ProductText text={chapterTitle(section.title)}/></h3></header><RichBody text={section.body}/>{inventory}{!!section.columns?.length && !!section.rows?.length && <DataTable columns={section.columns} rows={section.rows} caption={`${chapterTitle(section.title)}の比較・整理`}/ >}{!!section.sources?.length && <SourceLinks sources={section.sources}/>}</section>;
 }
-function Contents({ sections }: { sections: DetailSection[] }) { return <nav className="report-contents" aria-label="レポートの目次"><b>このレポートの内容</b><div>{sections.map((section,index) => <a href={`#report-section-${index}`} key={index}>{String(index + 1).padStart(2,"0")}　{chapterTitle(section.title)}</a>)}</div></nav>; }
+function Contents({ sections }: { sections: DetailSection[] }) { return <nav className="report-contents" aria-label="レポートの目次"><b>このレポートの内容</b><div>{sections.map((section,index) => <a href={`#report-section-${index}`} key={index}>{String(index + 1).padStart(2,"0")}　<ProductText text={chapterTitle(section.title)}/></a>)}</div></nav>; }
 
 function LegacyReport({ text }: { text: string }) {
   const sections = parseSections(text);
@@ -171,9 +192,9 @@ const priorityLabels: Record<string, string> = { P0: "先に確認・対応", P1
 function ActionDetails({ action, index, findings }: { action: Action; index: number; findings: Finding[] }) {
   const related = findings.flatMap((finding,i) => finding.id && action.findingIds?.includes(finding.id) ? [{ finding, index: i }] : []);
   return <article id={`report-action-${index}`} className="action-detail">
-    <header><span className={`action-priority priority-${action.priority}`}>{action.priority || index + 1}<small>{priorityLabels[action.priority || ""] || "実施案"}</small></span><div><h4>{action.action}</h4><div className="action-meta">{action.timing && <span>時期：{action.timing}</span>}{action.owner && <span>担当案：{action.owner}</span>}{action.effort && <span>手間：{action.effort}</span>}</div></div></header>
+    <header><span className={`action-priority priority-${action.priority}`}>{action.priority || index + 1}<small>{priorityLabels[action.priority || ""] || "実施案"}</small></span><div><h4><ProductText text={action.action}/></h4><div className="action-meta">{action.timing && <span>時期：<ProductText text={action.timing}/></span>}{action.owner && <span>担当案：<ProductText text={action.owner}/></span>}{action.effort && <span>手間：<ProductText text={action.effort}/></span>}</div></div></header>
     {action.reason && <RichBody text={action.reason}/>}
-    {!!related.length && <div className="related-findings">対応する課題：{related.map(({ finding, index: findingIndex }) => <a href={`#report-finding-${findingIndex}`} key={findingIndex}>{finding.id} {finding.title}</a>)}</div>}
+    {!!related.length && <div className="related-findings">対応する課題：{related.map(({ finding, index: findingIndex }) => <a href={`#report-finding-${findingIndex}`} key={findingIndex}>{finding.id} <ProductText text={finding.title}/></a>)}</div>}
     <div className="action-detail-grid">
       {!!action.steps?.length && <section><h5>実行の手順</h5><ol>{action.steps.map((step,i) => <li key={i}><LinkedText text={step}/></li>)}</ol></section>}
       {(action.deliverable || action.verification) && <section><h5>完了の目安・公開前の確認</h5>{action.deliverable && <p><LinkedText text={action.deliverable}/></p>}{action.verification && <p><LinkedText text={action.verification}/></p>}</section>}
@@ -209,15 +230,17 @@ export function IntegratedReport({ text }: { text: string }) {
   const products = report.productInventory || [];
   const reviewedInventory = report.originalProductInventory !== undefined || products.some((product) => product.reviewStatus !== undefined);
   const inventory = reviewedInventory ? <ReviewedInventory products={products} originals={report.originalProductInventory}/> : products.length ? <ProductInventory products={products}/> : null;
+  const inventoryTable = inventory && <ProductNames.Provider value={null}>{inventory}</ProductNames.Provider>;
+  const names = new Map(products.map((product) => [product.id?.normalize("NFKC") ?? "", product.name.trim()]));
   const productSectionIndex = detailSections.findIndex((section) => /コース|メニュー|料金/.test(section.title));
-  return <div className="integrated-report report-document">
+  return <ProductNames.Provider value={names}><div className="integrated-report report-document">
     {(!report.qualityVersion || report.qualityVersion < 2) && <p className="report-version-note">このレポートは保存時の内容を表示しています。調査範囲・根拠区分・実行手順を詳しく整理する新しい形式は、次の解析から適用されます。</p>}
-    <section className="report-summary"><span className="panel-kicker">EXECUTIVE SUMMARY</span><h3>{report.overallAssessment || "総合評価"}</h3><RichBody text={report.keyMessage || ""}/></section>
+    <section className="report-summary"><span className="panel-kicker">EXECUTIVE SUMMARY</span><h3><ProductText text={report.overallAssessment || "総合評価"}/></h3><RichBody text={report.keyMessage || ""}/></section>
     <nav className="report-reading-nav" aria-label="レポートの読み進め方">{!!report.keyFindings.length && <a href="#report-findings">課題と根拠を見る <span>↓</span></a>}{!!actions.length && <a href="#report-actions">実行手順を見る <span>↓</span></a>}{!!report.researchCoverage?.length && <a href="#report-coverage">調査範囲を確かめる <span>↓</span></a>}{!!detailSections.length && <a href="#report-details">詳細な分析を読む <span>↓</span></a>}</nav>
-    {!!firstActions.length && <section className="report-priorities"><div className="report-section-heading"><h3>{storeActions.length >= 3 ? "まず取り組む3項目" : "まず取り組むこと"}</h3></div><p className="report-reading-note">担当・時期・目標は実施案です。店舗で確認してから着手してください。</p><ol>{firstActions.map(({ action, index }) => <li key={index}><span className={`priority-tag priority-${action.priority}`}>{action.priority || index + 1}</span><a href={`#report-action-${index}`}><b>{action.action}</b><span>{[priorityLabels[action.priority || ""], action.timing].filter(Boolean).join(" · ")}</span></a><span aria-hidden="true">↓</span></li>)}</ol>{storeActions.length > 3 && <a className="all-actions-link" href="#report-actions-store">すべての施策と実行手順を見る（{storeActions.length}件） <span aria-hidden="true">↓</span></a>}</section>}
+    {!!firstActions.length && <section className="report-priorities"><div className="report-section-heading"><h3>{storeActions.length >= 3 ? "まず取り組む3項目" : "まず取り組むこと"}</h3></div><p className="report-reading-note">担当・時期・目標は実施案です。店舗で確認してから着手してください。</p><ol>{firstActions.map(({ action, index }) => <li key={index}><span className={`priority-tag priority-${action.priority}`}>{action.priority || index + 1}</span><a href={`#report-action-${index}`}><b><ProductText text={action.action}/></b><span><ProductText text={[priorityLabels[action.priority || ""], action.timing].filter(Boolean).join(" · ")}/></span></a><span aria-hidden="true">↓</span></li>)}</ol>{storeActions.length > 3 && <a className="all-actions-link" href="#report-actions-store">すべての施策と実行手順を見る（{storeActions.length}件） <span aria-hidden="true">↓</span></a>}</section>}
     {!!report.keyFindings.length && <div id="report-findings">{scopeGroups.map((group) => {
       const findings = report.keyFindings.map((finding,index) => ({ finding, index })).filter(({ finding }) => scopeOf(finding.scope) === group.scope);
-      return !!findings.length && <section id={`report-findings-${group.scope}`} className="report-findings" key={group.scope}><div className="report-section-heading"><h3>{group.findingTitle}</h3></div><p className="report-reading-note">{group.note}</p><div className="finding-list">{findings.map(({ finding, index }) => <article id={`report-finding-${index}`} className={`finding-card severity-${finding.severity}`} key={index}><div className="finding-title"><span>{finding.id || `課題 ${index + 1}`}</span><span>{labels[finding.severity ?? ""] || "優先度は本文参照"}</span>{finding.confidence && <span className={`confidence-label confidence-${finding.confidence}`}>{confidenceLabels[finding.confidence] || "根拠は本文参照"}</span>}<h4>{finding.title}</h4></div><RichBody text={finding.issue || ""}/>{finding.impact && <div className="finding-impact"><b>お客様・店舗への影響</b><RichBody text={finding.impact}/></div>}<div className="finding-detail-grid">{finding.evidence && <div className="finding-evidence"><b>根拠と確認範囲</b><RichBody text={finding.evidence}/></div>}{finding.action && <div className="finding-action"><b>具体的な変更案</b><RichBody text={finding.action}/></div>}</div>{(finding.counterpoint || finding.verification) && <div className="finding-verification">{finding.counterpoint && <div><b>別の解釈・反証</b><RichBody text={finding.counterpoint}/></div>}{finding.verification && <div><b>実行前に確認すること</b><RichBody text={finding.verification}/></div>}</div>}{!!finding.sources?.length && <SourceLinks sources={finding.sources}/>}</article>)}</div></section>;
+      return !!findings.length && <section id={`report-findings-${group.scope}`} className="report-findings" key={group.scope}><div className="report-section-heading"><h3>{group.findingTitle}</h3></div><p className="report-reading-note">{group.note}</p><div className="finding-list">{findings.map(({ finding, index }) => <article id={`report-finding-${index}`} className={`finding-card severity-${finding.severity}`} key={index}><div className="finding-title"><span>{finding.id || `課題 ${index + 1}`}</span><span>{labels[finding.severity ?? ""] || "優先度は本文参照"}</span>{finding.confidence && <span className={`confidence-label confidence-${finding.confidence}`}>{confidenceLabels[finding.confidence] || "根拠は本文参照"}</span>}<h4><ProductText text={finding.title}/></h4></div><RichBody text={finding.issue || ""}/>{finding.impact && <div className="finding-impact"><b>お客様・店舗への影響</b><RichBody text={finding.impact}/></div>}<div className="finding-detail-grid">{finding.evidence && <div className="finding-evidence"><b>根拠と確認範囲</b><RichBody text={finding.evidence}/></div>}{finding.action && <div className="finding-action"><b>具体的な変更案</b><RichBody text={finding.action}/></div>}</div>{(finding.counterpoint || finding.verification) && <div className="finding-verification">{finding.counterpoint && <div><b>別の解釈・反証</b><RichBody text={finding.counterpoint}/></div>}{finding.verification && <div><b>実行前に確認すること</b><RichBody text={finding.verification}/></div>}</div>}{!!finding.sources?.length && <SourceLinks sources={finding.sources}/>}</article>)}</div></section>;
     })}</div>}
     {!!actions.length && <div id="report-actions">{scopeGroups.map((group) => {
       const groupedActions = actions.map((action,index) => ({ action, index })).filter(({ action }) => scopeOf(action.scope) === group.scope);
@@ -228,7 +251,7 @@ export function IntegratedReport({ text }: { text: string }) {
     {!!report.limitations?.length && <aside className="report-limitations"><h3>判断前に押さえる制約</h3><RichBody text={report.limitations.map((item) => `・${item}`).join("\n")}/></aside>}
     {!!detailSections.length && <div id="report-details"><div className="report-section-heading"><h3>根拠と比較から読む詳細分析</h3></div><Contents sections={detailSections}/></div>}
     {!!report.detailSections?.length && report.detailedReport && <section className="report-document-section"><header><h3>分析の前提と読み方</h3></header><RichBody text={report.detailedReport}/></section>}
-    {productSectionIndex < 0 && inventory}
-    {detailSections.map((section,index) => <DocumentSection section={section} index={index} inventory={index === productSectionIndex ? inventory : undefined} key={index}/>)}
-  </div>;
+    {productSectionIndex < 0 && inventoryTable}
+    {detailSections.map((section,index) => <DocumentSection section={section} index={index} inventory={index === productSectionIndex ? inventoryTable : undefined} key={index}/>)}
+  </div></ProductNames.Provider>;
 }
