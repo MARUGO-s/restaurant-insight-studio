@@ -3,6 +3,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # 18:17 and 21:17 JST, after the BOJ's publication time.
+    - cron: '17 9,12 * * 1-5'
 permissions:
   contents: read
   pages: write
@@ -11,10 +14,47 @@ concurrency:
   group: pages
   cancel-in-progress: false
 jobs:
+  refresh-rate:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Update the BOJ rate
+        run: |
+          python3 -B -m unittest discover -s scripts -p 'test_boj_usd_jpy.py'
+          if ! (python3 -m pip install --disable-pip-version-check --timeout 15 --retries 2 'PyMuPDF==1.28.2' && python3 scripts/update-boj-usd-jpy.py); then
+            echo '::warning::BOJ rate update failed; using the last verified rate.'
+          fi
+      - name: Save a changed rate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet -- src/lib/boj-usd-jpy.json; then
+            exit 0
+          fi
+          gh auth setup-git --hostname github.com
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/lib/boj-usd-jpy.json
+          git commit -m 'Update the Bank of Japan USD/JPY reference rate'
+          git push origin HEAD:main
   build:
+    needs: refresh-rate
+    if: ${{ !cancelled() && (needs.refresh-rate.result == 'success' || needs.refresh-rate.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22

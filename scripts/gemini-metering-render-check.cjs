@@ -16,6 +16,12 @@ const browserModules = {
   "./StoreNameInput": {},
   "./ReportView": {},
   "./ReportTrash": {},
+  // Keep the expected yen amounts independent of the latest published exchange rate.
+  "./boj-usd-jpy.json": {
+    yenPerDollar: 159.59,
+    asOf: "2026-11-19",
+    source: "https://www.boj.or.jp/statistics/market/forex/fxdaily/fxlist/fx261119.pdf",
+  },
 };
 
 function loadComponent(file, extraSource = "") {
@@ -29,7 +35,7 @@ function loadComponent(file, extraSource = "") {
     return require(name);
   };
   const source = fs.readFileSync(filePath, "utf8") + extraSource;
-  const compilerOptions = { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022 };
+  const compilerOptions = { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022, esModuleInterop: true };
   loaded._compile(ts.transpileModule(source, { compilerOptions }).outputText, filePath);
   return loaded.exports;
 }
@@ -56,7 +62,7 @@ const expected = new Map([
 globalThis.fetch = noNetwork;
 // Expose the real cost page to the test without changing the production module.
 const { CostPage } = loadComponent("App.tsx", "\nexport { CostPage };\n");
-const renderCosts = (costs) => renderToStaticMarkup(React.createElement(CostPage, {
+const renderCosts = (costs, Component = CostPage) => renderToStaticMarkup(React.createElement(Component, {
   reports: [], costs, loading: false, error: "", onRefresh: noNetwork,
 }));
 for (const { label, row } of scenarios) {
@@ -103,6 +109,18 @@ try {
   assert.match(summary, /<span>質問への回答<\/span><b>13\.04円<\/b>/);
   assert.match(summary, /<strong>判明分 6\.34円 \+ 未算定<\/strong>/);
   assert.match(summary, /class="cost-run-breakdown"><span>Google Gemini gemini-3\.8-flash: 6\.34円<\/span>/);
+
+  browserModules["./boj-usd-jpy.json"] = {
+    yenPerDollar: 160.25,
+    asOf: "2026-11-20",
+    source: "https://www.boj.or.jp/statistics/market/forex/fxdaily/fxlist/fx261120.pdf",
+  };
+  const { CostPage: UpdatedCostPage } = loadComponent("App.tsx", "\nexport { CostPage };\n");
+  const updated = renderCosts([zeroSearch, unpriced], UpdatedCostPage);
+  assert.match(updated, /1ドル＝160\.25円/);
+  assert.match(updated, /日本銀行の中心相場（2026年11月20日）/);
+  assert.match(updated, /<span>今月の標準料金積算<\/span><b>6\.37円<\/b><small>料金未確定 1件を除く<\/small>/);
+  assert.match(updated, /class="cost-event-price"><b>6\.37円<\/b>/);
 } finally {
   globalThis.Date = NativeDate;
 }

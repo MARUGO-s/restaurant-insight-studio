@@ -1,3 +1,5 @@
+import bojUsdJpy from "./boj-usd-jpy.json" with { type: "json" };
+
 type FeeRecord = {
   request_status: string; measurement_status: string; list_price_usd: number | null;
   usage: Record<string, number | null>;
@@ -6,9 +8,9 @@ type FeeRecord = {
 };
 
 export const usdJpyReference = {
-  yenPerDollar: 159.59,
-  date: "2026年11月19日",
-  source: "https://www.boj.or.jp/statistics/market/forex/fxdaily/fxlist/fx261119.pdf",
+  yenPerDollar: bojUsdJpy.yenPerDollar,
+  date: new Intl.DateTimeFormat("ja-JP", { dateStyle: "long", timeZone: "UTC" }).format(new Date(`${bojUsdJpy.asOf}T00:00:00Z`)),
+  source: bojUsdJpy.source,
 };
 const yenFormat = new Intl.NumberFormat("ja-JP", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
