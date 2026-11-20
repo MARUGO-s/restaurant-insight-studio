@@ -56,7 +56,10 @@ function fakeDatabase(initial: Record<string, any>[] = []) {
         order(key: string, options?: { ascending: boolean }) { sortKey = key; descending = options?.ascending === false; return query; },
         limit(count: number) { limit = count; return query; },
         maybeSingle() { single = true; return query; },
-        insert(row: Record<string, any>) { costs.push(structuredClone(row)); return Promise.resolve({ error: null }); },
+        insert(row: Record<string, any>) {
+          costs.push({ created_at: new Date(costs.length).toISOString(), ...structuredClone(row) });
+          return Promise.resolve({ error: null });
+        },
         update(row: Record<string, any>) { patch = row; return query; },
         then(resolve: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) {
           let rows = (table === "restaurant_insight_jobs" ? research : costs).filter(row => filters.every(matches => matches(row)));
@@ -127,6 +130,8 @@ Deno.test("ordinary synthesis submits once and polls the same background respons
       assert.equal(url.pathname, "/v1/responses");
       const payload = JSON.parse(String(init?.body));
       assert.equal(payload.model, synthesisModel);
+      assert.equal(payload.max_output_tokens, 64_000);
+      assert.deepEqual(payload.reasoning, { effort: "medium" });
       assert.equal(payload.background, true);
       assert.equal(payload.store, true);
       assert.notEqual(payload.stream, true);
@@ -181,6 +186,145 @@ Deno.test("ordinary synthesis submits once and polls the same background respons
     assert.equal(finish.args.p_output.synthesisDraft.responseId, responseId);
     assert.ok(finish.args.p_output.synthesisDraft.toolSources.includes(toolSource));
     assert.equal(JSON.parse(finish.args.p_output.report_row.report).qualityGate.version, 3);
+  });
+});
+
+function providerSegment(id: string, status: "queued" | "incomplete" | "completed" | "failed", text: string, source?: string, reason?: string) {
+  return Response.json({ id, model: synthesisModel, status,
+    ...(reason ? { incomplete_details: { reason } } : {}),
+    output: [
+      ...(source ? [{ type: "web_search_call", status: "completed", action: { sources: [{ url: source }] } }] : []),
+      { type: "message", content: [{ type: "output_text", text }] },
+    ],
+    ...(status === "queued" ? {} : { usage: { input_tokens: 100, output_tokens: status === "incomplete" ? 64_000 : 200 } }),
+  });
+}
+
+Deno.test("output caps continue the same Astra draft through background polls and preserve exact JSON boundaries", async () => {
+  const d = fakeDatabase();
+  const ids = [responseId, "resp_continuation_two", "resp_continuation_three"];
+  const sources = [toolSource, "https://observed.test/second", "https://observed.test/third"];
+  const critique = "確認の制約を残す  公開情報  追加の確認";
+  const report = withIntegrityReviews(qualityReport(), [market, gourmet, social]);
+  report.keyFindings[0].sources = sources;
+  const whole = JSON.stringify({ critique, report });
+  const firstBoundary = whole.indexOf(" 公開情報");
+  const secondBoundary = whole.indexOf(" 追加の確認");
+  const fragments = [whole.slice(0, firstBoundary), whole.slice(firstBoundary, secondBoundary), whole.slice(secondBoundary)];
+  const requests: string[] = [];
+  let post = 0;
+  await withProvider(async (target, init) => {
+    const url = new URL(String(target));
+    assert.equal(url.origin, "https://api.openai.com");
+    if (init?.method === "POST") {
+      assert.equal(url.pathname, "/v1/responses");
+      const payload = JSON.parse(String(init.body));
+      assert.equal(payload.model, synthesisModel);
+      assert.equal(payload.max_output_tokens, 64_000);
+      assert.equal(payload.background, true);
+      assert.equal(payload.store, true);
+      requests.push(`POST ${ids[post]}`);
+      if (post > 0) {
+        assert.deepEqual(payload.reasoning, { effort: "low" });
+        assert.deepEqual(payload.input.map((item: { role: string }) => item.role), ["user", "assistant", "user"]);
+        const transcript = payload.input[1].content;
+        assert.equal(typeof transcript === "string" ? transcript : transcript[0].text, fragments.slice(0, post).join(""));
+        assert.equal(d.costs.at(-1)?.request_metadata.synthesis_continuation_of, ids[post - 1]);
+      }
+      return providerSegment(ids[post++], "queued", "");
+    }
+    const index = ids.indexOf(url.pathname.split("/").at(-1)!);
+    assert.ok(index >= 0);
+    requests.push(`GET ${ids[index]}`);
+    return index < 2
+      ? providerSegment(ids[index], "incomplete", fragments[index], sources[index], "max_output_tokens")
+      : providerSegment(ids[index], "completed", fragments[index], sources[index]);
+  }, async () => {
+    for (let i = 0; i < ids.length; i++) {
+      const attempt = i + 1;
+      const firstCall = d.calls.length;
+      await d.execute(attempt);
+      assert.equal(d.saved.backgroundSynthesisPending, true);
+      assert.equal(d.costs[i].request_metadata.provider_response_id, ids[i]);
+      await d.execute(attempt);
+      const finish = d.calls.filter(call => call.name === "restaurant_insight_finish_job").at(-1)!;
+      if (i < 2) {
+        assert.equal(d.costs[i].request_metadata.incomplete_reason, "max_output_tokens");
+        assert.equal(d.costs[i].measurement_status, "complete");
+        assert.equal(d.saved.backgroundSynthesisPending, false);
+        const checkpoint = d.saved.synthesisContinuation;
+        assert.equal(checkpoint.responseId, ids[i]);
+        assert.equal(checkpoint.costId, d.costs[i].id);
+        assert.equal(checkpoint.count, i + 1);
+        assert.equal(checkpoint.text, fragments.slice(0, i + 1).join(""));
+        assert.deepEqual(checkpoint.toolSources, sources.slice(0, i + 1));
+        assert.equal(finish.args.p_retryable, true);
+        assert.ok(finish.args.p_error);
+        assert.equal(d.saved.report_row, undefined);
+      } else {
+        assert.equal(finish.args.p_error, null);
+        assert.equal(finish.args.p_output.backgroundSynthesisPending, false);
+        assert.ok(!d.calls.slice(firstCall).some(call => call.name === "restaurant_insight_checkpoint_job"
+          && call.args.p_output.backgroundSynthesisPending === false));
+        assert.equal(d.saved.synthesisDraft.text, whole);
+        assert.deepEqual(d.saved.synthesisDraft.toolSources, sources);
+        assert.equal(d.saved.report_row.critique, critique);
+        const savedReport = JSON.parse(d.saved.report_row.report);
+        assert.equal(savedReport.qualityGate.version, 3);
+        assert.deepEqual(savedReport.keyFindings[0].sources, sources);
+      }
+    }
+    await d.execute(3);
+    assert.deepEqual(requests, ids.flatMap(id => [`POST ${id}`, `GET ${id}`]));
+    assert.equal(d.costs.length, 3);
+  });
+});
+
+Deno.test("non-limit incomplete responses and provider failures cannot start a paid continuation", async (t) => {
+  for (const [status, reason, label] of [["incomplete", "content_filter", "content filter"],
+    ["incomplete", undefined, "missing incomplete reason"], ["failed", undefined, "provider failure"]] as const) {
+    await t.step(label, async () => {
+      const d = fakeDatabase();
+      let posts = 0;
+      await withProvider(async (_target, init) => {
+        if (init?.method === "POST") posts++;
+        return providerSegment(responseId, status, "保存済みの途中結果", undefined, reason);
+      }, async () => {
+        await d.execute(1);
+        const failure = d.calls.filter(call => call.name === "restaurant_insight_finish_job").at(-1)!;
+        assert.equal(failure.args.p_retryable, false);
+        assert.ok(failure.args.p_error);
+        // A provider refusal remains noncontinuable even if the saved attempt is rechecked.
+        if (status === "incomplete") await d.execute(2);
+        assert.equal(posts, 1);
+        assert.equal(d.costs.length, 1);
+        assert.equal(d.saved.report_row, undefined);
+      });
+    });
+  }
+});
+
+Deno.test("ambiguous continuation submission reserves one attempt without reposting", async () => {
+  const d = fakeDatabase();
+  let posts = 0;
+  await withProvider(async (_target, init) => {
+    assert.equal(init?.method, "POST");
+    posts++;
+    if (posts === 1) return providerSegment(responseId, "incomplete", '{"critique":"途中', toolSource, "max_output_tokens");
+    assert.equal(posts, 2);
+    throw new Error("disconnect after continuation was sent");
+  }, async () => {
+    await d.execute(1);
+    await d.execute(2);
+    await d.execute(3);
+    assert.equal(posts, 2);
+    assert.equal(d.costs.length, 2);
+    assert.equal(d.costs[1].request_status, "unknown");
+    assert.equal(d.costs[1].request_metadata.synthesis_continuation_of, responseId);
+    assert.equal(d.saved.synthesisContinuation.text, '{"critique":"途中');
+    const finish = d.calls.filter(call => call.name === "restaurant_insight_finish_job").at(-1)!;
+    assert.equal(finish.args.p_retryable, false);
+    assert.equal(d.saved.report_row, undefined);
   });
 });
 

@@ -1,4 +1,4 @@
--- Run against isolated test PostgreSQL after the background-synthesis migration.
+-- Run against isolated test PostgreSQL after the synthesis-continuations migration.
 -- The dispatcher queues requests in pg_net, which only sends after commit. This test rolls back.
 begin;
 do $$
@@ -13,6 +13,7 @@ declare
   v_result jsonb;
   v_lease uuid;
   v_started timestamptz;
+  v_max_attempts integer;
   v_output jsonb := '{"text":"preserved synthetic evidence","backgroundSynthesisPending":true,"backgroundSynthesis":{"responseId":"resp_fixture"}}';
   v_cost_before jsonb;
   v_deadline timestamptz;
@@ -31,18 +32,33 @@ begin
   insert into auth.users(id) values(v_user);
   v_run := public.restaurant_insight_queue_run(v_user,
     '{"storeName":"Background SQL verification","storeUrl":"https://example.com","selectedSites":[{"id":"tabelog"}]}'::jsonb);
-  select id into strict v_synthesis from public.restaurant_insight_jobs where run_id = v_run and job_key = 'synthesis';
+  select id, max_attempts into strict v_synthesis, v_max_attempts
+    from public.restaurant_insight_jobs where run_id = v_run and job_key = 'synthesis';
+  if v_max_attempts <> 4 then raise exception 'Astra continuation budget was not set'; end if;
   update public.restaurant_insight_jobs set status = 'done', attempts = 1
     where run_id = v_run and job_key <> 'synthesis';
 
+  -- Research may use most of its window before the first claim of ordinary synthesis.
+  update public.restaurant_insight_runs set deadline_at = now() + interval '2 minutes' where id = v_run;
+  update public.restaurant_insight_jobs set dispatched_at = now(), dispatch_token_hash = v_token_hash where id = v_synthesis;
+  v_result := public.restaurant_insight_claim_job(v_synthesis, v_token);
+  v_lease := (v_result#>>'{job,lease_token}')::uuid;
+  if v_lease is null or (v_result#>>'{job,attempts}')::integer is distinct from 1
+    or (v_result#>>'{run,deadline_at}')::timestamptz is distinct from now() + interval '60 minutes'
+  then raise exception 'First synthesis claim did not get its own 60-minute window'; end if;
+  perform public.restaurant_insight_finish_job(v_synthesis, v_lease, null, 'simulated output limit', true);
+
   -- Claim the last permitted generation. Its subsequent polls must keep this attempt number.
+  update public.restaurant_insight_runs set deadline_at = now() + interval '35 minutes'
+    where id = v_run returning deadline_at into v_deadline;
   update public.restaurant_insight_jobs set attempts = max_attempts - 1,
-    dispatched_at = now(), dispatch_token_hash = v_token_hash
+    next_attempt_at = now(), dispatched_at = now(), dispatch_token_hash = v_token_hash
     where id = v_synthesis;
   v_result := public.restaurant_insight_claim_job(v_synthesis, v_token);
   v_lease := (v_result#>>'{job,lease_token}')::uuid;
-  if v_lease is null or (v_result#>>'{job,attempts}')::integer is distinct from 2 then
-    raise exception 'Last generation was not counted';
+  if v_lease is null or (v_result#>>'{job,attempts}')::integer is distinct from v_max_attempts
+    or (v_result#>>'{run,deadline_at}')::timestamptz is distinct from v_deadline then
+    raise exception 'Last generation changed its attempt or deadline';
   end if;
   update public.restaurant_insight_jobs set started_at = now() - interval '1 minute'
     where id = v_synthesis returning started_at into v_started;
@@ -60,13 +76,13 @@ begin
 
   insert into public.restaurant_insight_cost_events(id,user_id,run_id,job_id,attempt_number,
     operation,provider,model,request_status,measurement_status,pricing_as_of,request_metadata)
-  values(v_cost,v_user,v_run,v_synthesis,2,'fact_check_synthesis','OpenAI','fixture','unknown','unknown',current_date,
+  values(v_cost,v_user,v_run,v_synthesis,v_max_attempts,'fact_check_synthesis','OpenAI','fixture','unknown','unknown',current_date,
     '{"synthesis_background":true,"provider_response_id":"resp_fixture"}');
   select to_jsonb(c) into v_cost_before from public.restaurant_insight_cost_events c where c.id = v_cost;
   begin
     insert into public.restaurant_insight_cost_events(user_id,run_id,job_id,attempt_number,
       operation,provider,model,request_status,measurement_status,pricing_as_of,request_metadata)
-    values(v_user,v_run,v_synthesis,2,'fact_check_synthesis','OpenAI','fixture','unknown','unknown',current_date,
+    values(v_user,v_run,v_synthesis,v_max_attempts,'fact_check_synthesis','OpenAI','fixture','unknown','unknown',current_date,
       '{"synthesis_background":true}');
     raise exception 'A second background generation reservation was accepted';
   exception when unique_violation then
@@ -81,7 +97,7 @@ begin
   if v_job.status <> 'pending' or v_job.next_attempt_at < now() + interval '20 seconds'
     or v_job.lease_token is not null or v_job.lease_until is not null
     or v_job.dispatch_token_hash is not null or v_job.dispatched_at is not null or v_job.error_message is not null
-    or v_job.attempts <> 2 or v_job.output is distinct from v_output
+    or v_job.attempts <> v_max_attempts or v_job.output is distinct from v_output
     or (select to_jsonb(c) from public.restaurant_insight_cost_events c where c.id = v_cost) is distinct from v_cost_before
   then raise exception 'Deferral altered checkpoints, metering, attempts, or timing'; end if;
 
@@ -99,7 +115,8 @@ begin
 
   update public.restaurant_insight_jobs set dispatch_token_hash = v_token_hash where id = v_synthesis;
   v_result := public.restaurant_insight_claim_job(v_synthesis, v_token);
-  if (v_result#>>'{job,attempts}')::integer is distinct from 2
+  if (v_result#>>'{job,attempts}')::integer is distinct from v_max_attempts
+    or (v_result#>>'{run,deadline_at}')::timestamptz is distinct from v_deadline
     or (v_result#>>'{job,started_at}')::timestamptz is distinct from v_started
     or (v_result#>>'{job,lease_token}')::uuid is not distinct from v_lease
     or public.restaurant_insight_defer_synthesis(v_synthesis, v_lease)
@@ -111,7 +128,7 @@ begin
   if public.restaurant_insight_defer_synthesis(v_synthesis, v_lease) then raise exception 'Expired lease deferred a poll'; end if;
   perform public.restaurant_insight_dispatch_jobs();
   select * into strict v_job from public.restaurant_insight_jobs where id = v_synthesis;
-  if v_job.status <> 'pending' or v_job.attempts <> 2 or v_job.lease_token is not null
+  if v_job.status <> 'pending' or v_job.attempts <> v_max_attempts or v_job.lease_token is not null
     or v_job.next_attempt_at < now() + interval '20 seconds' or v_job.output is distinct from v_output
     or v_job.error_message is not null
   then raise exception 'Poll did not recover from lease loss at the generation limit'; end if;
@@ -136,7 +153,7 @@ begin
   if (v_result->>'reset_jobs')::integer is distinct from 1 then raise exception 'Retry reset completed stages'; end if;
   update public.restaurant_insight_jobs set dispatched_at = now(), dispatch_token_hash = v_token_hash where id = v_synthesis;
   v_result := public.restaurant_insight_claim_job(v_synthesis, v_token);
-  if (v_result#>>'{job,attempts}')::integer is distinct from 2 or v_result#>'{job,output}' is distinct from v_output
+  if (v_result#>>'{job,attempts}')::integer is distinct from v_max_attempts or v_result#>'{job,output}' is distinct from v_output
   then raise exception 'Manual retry lost the original generation or its response'; end if;
   v_result := public.restaurant_insight_finish_job(v_synthesis, (v_result#>>'{job,lease_token}')::uuid,
     '{"backgroundSynthesisPending":false,"report_row":{"store_name":"Background SQL verification","store_url":"https://example.com","selected_sites":[{"id":"tabelog"}],"agents":[],"critique":"verified","report":"test report"}}',

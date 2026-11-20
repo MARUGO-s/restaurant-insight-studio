@@ -43,8 +43,8 @@ type Page = "analysis" | "costs" | "trash";
 type TrashResult = { reports: Report[]; nextCursor?: string | null; total?: number };
 type ReportAction = "trash_report" | "restore_report" | "delete_report";
 type ReportState = { state: "active" | "trashed" | "deleted" | "missing"; report?: Report };
-type AnalysisJob = { key: string; status: "pending" | "running" | "done" | "failed"; attempts: number; maxAttempts: number; label: string; error?: string; directPages?: DirectPageReceipt[] };
-type RunState = { status: "running" | "done" | "failed" | "trashed" | "deleted"; progressStage: string; startedAt?: string; researchFocus?: string; jobs?: AnalysisJob[]; report?: Report; error?: string; canRegenerateSynthesis?: boolean; synthesisRevision?: string };
+type AnalysisJob = { key: string; status: "pending" | "running" | "done" | "failed"; attempts: number; maxAttempts: number; label: string; error?: string; directPages?: DirectPageReceipt[]; continuationCount?: number };
+type RunState = { status: "running" | "done" | "failed" | "trashed" | "deleted"; progressStage: string; startedAt?: string; deadlineAt?: string; researchFocus?: string; jobs?: AnalysisJob[]; report?: Report; error?: string; canRegenerateSynthesis?: boolean; synthesisRevision?: string };
 type ActiveRun = { runId: string; startedAt: string; storeName: string; researchFocus?: string };
 const RESEARCH_FOCUS_LIMIT = 2000;
 const RUN_STAGES = [
@@ -122,7 +122,7 @@ function readRunStatus(runId: string, signal: AbortSignal): Promise<RunState> {
   });
 }
 async function waitForAnalysis(runId: string, signal: AbortSignal, onState: (state: RunState) => void, onConnection: (notice: string) => void): Promise<{ kind: "done"; report: Report } | { kind: "failed" | "unknown" | "trashed" | "deleted" }> {
-  const deadline = Date.now() + 60 * 60_000;
+  let deadline = Date.now() + 60 * 60_000;
   let connectionFailures = 0;
   while (Date.now() < deadline) {
     if (signal.aborted) throw new DOMException("Polling cancelled", "AbortError");
@@ -134,6 +134,11 @@ async function waitForAnalysis(runId: string, signal: AbortSignal, onState: (sta
       if (state.status === "trashed" || state.status === "deleted") return { kind: state.status };
       if (state.status === "done" && state.report && !state.jobs?.some((job) => job.status !== "done")) return { kind: "done", report: state.report };
       if (state.status === "failed") return { kind: "failed" };
+      if (state.status === "running" && state.deadlineAt) {
+        const serverDeadline = Date.parse(state.deadlineAt);
+        // Allow the server's dispatcher to publish the final state after its deadline.
+        if (Number.isFinite(serverDeadline)) deadline = Math.max(deadline, serverDeadline + 2 * 60_000);
+      }
       if (state.status === "done") onConnection(state.jobs?.some((job) => job.status !== "done") ? "一部の調査が完了として記録されていません。全調査の状態を確認しています。" : "調査の完了を確認しました。保存済みレポートの取得を続けています。");
     } catch (failure) {
       if (signal.aborted) throw failure;
@@ -142,7 +147,7 @@ async function waitForAnalysis(runId: string, signal: AbortSignal, onState: (sta
     }
     await abortableDelay(Math.min(30_000, 5000 * Math.max(1, connectionFailures)), signal);
   }
-  onConnection("この画面での自動確認を60分で一時停止しました。調査を停止したわけではありません。「進行状況を再確認」から同じ解析の状況を確認できます。");
+  onConnection("この画面での自動確認を一時停止しました。「進行状況を再確認」から同じ解析の状況を確認できます。");
   return { kind: "unknown" };
 }
 function ResearchFocusNote({ text }: { text?: string }) {
@@ -172,7 +177,7 @@ function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onR
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   const elapsed = Math.max(0, Math.floor((now - new Date(state?.startedAt || run.startedAt).getTime()) / 1000));
   const elapsedLabel = Number.isFinite(elapsed) ? `${Math.floor(elapsed / 60)}分${String(elapsed % 60).padStart(2, "0")}秒` : "確認中";
-  const jobs = RUN_STAGES.map((stage) => state?.jobs?.find((job) => job.key === stage.key) ?? { ...stage, status: "pending" as const, attempts: 0, maxAttempts: 3 });
+  const jobs: AnalysisJob[] = RUN_STAGES.map((stage) => state?.jobs?.find((job) => job.key === stage.key) ?? { ...stage, status: "pending", attempts: 0, maxAttempts: 3 });
   const failed = state?.status === "failed";
   const regenerationAvailable = failed && state?.canRegenerateSynthesis === true && !!state.synthesisRevision;
   const done = jobs.filter((job) => job.status === "done").length;
@@ -182,7 +187,12 @@ function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onR
     <p className="run-guidance">調査結果は段階ごとに保存されます。画面を閉じても調査は続き、同じアカウントで開くと進行状況を確認できます。X調査は直近と過去を分けて実行し、再試行を含む解析には30分以上かかる場合があります。</p>
     <ResearchFocusNote text={state?.researchFocus ?? run.researchFocus}/>
     {notice && <div className="run-connection-notice" role="status">{notice}</div>}
-    <ol className="run-job-list">{jobs.map((job, index) => <li key={job.key} className={`run-job ${job.status}`}><span className="run-job-mark" aria-hidden="true">{job.status === "done" ? "✓" : index + 1}</span><div><b>{job.label || RUN_STAGES[index].label}</b><small>{job.key === "synthesis" && job.status === "running" ? "検証・執筆中" : statusNames[job.status]}{job.attempts > 0 ? ` · 試行 ${job.attempts}/${job.maxAttempts}回` : ""}</small>{job.error && <p>{job.status === "running" || job.status === "pending" ? "前回の試行: " : ""}{job.error}</p>}</div></li>)}</ol>
+    <ol className="run-job-list">{jobs.map((job, index) => {
+      const writing = job.key === "synthesis" && job.status === "running";
+      const continuationCount = writing ? job.continuationCount ?? 0 : 0;
+      const statusLabel = writing ? "検証・執筆中" : statusNames[job.status];
+      return <li key={job.key} className={`run-job ${job.status}`}><span className="run-job-mark" aria-hidden="true">{job.status === "done" ? "✓" : index + 1}</span><div><b>{job.label || RUN_STAGES[index].label}</b><small>{continuationCount > 0 ? `執筆を継続中（${continuationCount}回目）` : statusLabel}{continuationCount === 0 && job.attempts > 0 ? ` · 試行 ${job.attempts}/${job.maxAttempts}回` : ""}</small>{job.error && <p>{job.status === "running" || job.status === "pending" ? "前回の試行: " : ""}{job.error}</p>}</div></li>;
+    })}</ol>
     <DirectPageStatus pages={state?.jobs?.find((job) => job.key === "gourmet")?.directPages}/>
     {failed && <div className="run-failure-note"><b>完成済みの調査結果を保持しています。</b><p>{state?.error || "完了しなかった調査があります。"}</p><p>{regenerationAvailable ? "保存済み応答の再確認では、新しいAI生成を行いません。統合を作り直す場合だけ、別途確認のうえ追加API料金が発生します。完了済みの4つの専門調査は再実行しません。" : "再開すると、同じ解析の未完了の調査を再試行します。再試行分のAPI料金が発生する場合があります。"}この解析を閉じても、保存済みの調査結果や料金記録は削除されません。</p></div>}
     <div className="run-actions">{failed && <button type="button" className="primary-button" disabled={busy || polling || retrying || !!notice} onClick={onRetry}>{retrying ? "再開を確認しています…" : regenerationAvailable ? "保存済み応答を再確認（追加生成なし）" : "未完了の調査を再開"}</button>}{regenerationAvailable && !busy && !polling && !retrying && !notice && <button type="button" className="run-check-button" onClick={onRegenerate}>統合だけ作り直す（追加API料金）</button>}{!polling && <button type="button" className="run-check-button" disabled={busy || retrying} onClick={onCheck}>進行状況を再確認</button>}{failed && <button type="button" className="run-check-button" disabled={busy || polling || retrying || !!notice} onClick={onClose}>この解析を閉じて新しく分析</button>}</div>
@@ -631,7 +641,8 @@ export default function App() {
               <div><span className="role-icon gourmet">G</span><span><b>グルメ媒体</b><small>Gemini · ページ本文と検索</small></span></div>
               <div><span className="role-icon social">X</span><span><b>SNS・Xの声</b><small>Grok · X Search</small></span></div>
             </div>
-            <button className="primary-button" disabled={!!working || !!activeRun || discoveringRun || (!selectedSiteIds.length && !customSites.length)}>{working === "analysis" ? <><i className="spinner" />専門AIが調査しています</> : discoveringRun ? "実行中の解析を確認しています" : activeRun ? "進行中の解析を確認してください" : "選択したサイトを分析　↗"}</button>
+            <p className="muted form-intro">GPT-6.2 Astraが最終レポートを作成します。出力上限に達した場合は最大3回まで自動で続きを作成し、その分のAPI料金が発生します。</p>
+            <button className="primary-button" disabled={!!working || !!activeRun || discoveringRun || (!selectedSiteIds.length && !customSites.length)}>{working === "analysis" ? <><i className="spinner" />解析を実行しています</> : discoveringRun ? "実行中の解析を確認しています" : activeRun ? "進行中の解析を確認してください" : "選択したサイトを分析　↗"}</button>
             <div className="privacy-note">公開情報を対象に調査します。AI APIキーはSupabase Edge Functionからのみ利用します。</div>
           </form>
           <div className="panel process-panel"><div className="panel-kicker">調査の進め方</div><div className="process-step"><i>01</i><div><b>分野別に調査</b><small>3つのAIがそれぞれ独立して検索</small></div></div><div className="process-step"><i>02</i><div><b>相互に検証</b><small>矛盾・反証・未確認を整理</small></div></div><div className="process-step"><i>03</i><div><b>統合レポート</b><small>出典付きの優先施策にまとめる</small></div></div></div>
