@@ -2,6 +2,7 @@ import { load, type CheerioAPI } from "npm:cheerio@1.1.2/slim";
 
 export type DirectPageKind = "official" | "tabelog-store" | "tabelog-courses";
 type ExcerptLimits = { truncated: boolean };
+type PageExcerpt = { title: string; text: string; truncated?: boolean };
 
 const MAX_PAGE_CHARS = 16_000;
 const MAX_COURSES = 20;
@@ -18,6 +19,9 @@ const OFFICIAL_SECTIONS = [
 ];
 const RESTAURANT_DETAILS = /営業時間|定休日|ラストオーダー|貸[し]?切|個室|[￥¥]\s*[0-9０-９]|[0-9０-９][0-9０-９,，]*\s*円|\d{1,2}:\d{2}\s*[〜～–-]/i;
 const ERROR_TITLE = /access denied|forbidden|just a moment|captcha|not found|service unavailable|アクセス[がを]制限|ページが見つかりません|エラーが発生|メンテナンス中|^(?:403|404|429|500|503)\b/i;
+const COURSE_DETAILS = /コース|おまかせ|プラン|[0-9０-９]+\s*品|[￥¥][\d０-９,，]+|[\d０-９,，]+\s*円/;
+const COURSE_PRICE = /^[￥¥]\s*[\d０-９]|^[\d０-９][\d０-９,，]*(?:\s*円|$)|^円/;
+const COURSE_CONDITION = /[\d０-９]+\s*名|利用条件|要予約|予約締切|飲み放題|限定|提供期間/;
 
 function line(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -37,6 +41,11 @@ function fieldLine(limits: ExcerptLimits, label: string, value: string, maxChars
   return value ? label + "：" + clipped(limits, value, maxChars) : "";
 }
 
+function storeFieldsText(fields: Map<string, string>) {
+  if (!fields.has("店名") || !["住所", "営業時間", "貸切", "個室"].some((label) => fields.has(label))) return null;
+  return [...fields].map(([label, value]) => label + "：" + value).join("\n");
+}
+
 function storeText($: CheerioAPI, limits: ExcerptLimits): string | null {
   const fields = new Map<string, string>();
   $("tr").each((_index, element) => {
@@ -47,8 +56,7 @@ function storeText($: CheerioAPI, limits: ExcerptLimits): string | null {
     if (value) fields.set(label, clipped(limits, value, 1_200));
   });
 
-  if (!fields.has("店名") || !["住所", "営業時間", "貸切", "個室"].some((label) => fields.has(label))) return null;
-  return [...fields].map(([label, value]) => label + "：" + value).join("\n");
+  return storeFieldsText(fields);
 }
 
 function courseText($: CheerioAPI, limits: ExcerptLimits): string | null {
@@ -114,7 +122,13 @@ function officialText($: CheerioAPI, limits: ExcerptLimits): string | null {
   return excerpts.join("\n\n");
 }
 
-export function extractDirectPage(kind: DirectPageKind, html: string): { title: string; text: string; truncated?: boolean } | null {
+function pageExcerpt(title: string, text: string | null, limits: ExcerptLimits): PageExcerpt | null {
+  if (!text) return null;
+  const excerpt = { title: clipped(limits, title, 180), text: clipped(limits, text, MAX_PAGE_CHARS) };
+  return limits.truncated ? { ...excerpt, truncated: true } : excerpt;
+}
+
+export function extractDirectPage(kind: DirectPageKind, html: string): PageExcerpt | null {
   const $ = load(html);
   const title = line($("title").first().text());
   if (!title || ERROR_TITLE.test(title)) return null;
@@ -124,7 +138,72 @@ export function extractDirectPage(kind: DirectPageKind, html: string): { title: 
 
   const limits = { truncated: false };
   const text = kind === "tabelog-store" ? storeText($, limits) : kind === "tabelog-courses" ? courseText($, limits) : officialText($, limits);
-  if (!text) return null;
-  const excerpt = { title: clipped(limits, title, 180), text: clipped(limits, text, MAX_PAGE_CHARS) };
-  return limits.truncated ? { ...excerpt, truncated: true } : excerpt;
+  return pageExcerpt(title, text, limits);
+}
+
+export function renderedPageSelectors(kind: DirectPageKind): string[] {
+  if (kind === "tabelog-store") return ["body", ".rstinfo-table tr"];
+  if (kind === "tabelog-courses") return ["body", ".rstdtl-course-list"];
+  return ["body"];
+}
+
+function renderedStoreText(rows: string[], limits: ExcerptLimits) {
+  const fields = new Map<string, string>();
+  for (const row of rows) {
+    const [heading, ...rest] = row.trim().split(row.includes("\t") ? "\t" : /\r?\n/);
+    const label = heading.replace(/\s+/g, "");
+    const value = line(rest.join(" "));
+    if (value && STORE_FIELDS.has(label) && !fields.has(label)) fields.set(label, clipped(limits, value, 1_200));
+  }
+  return storeFieldsText(fields);
+}
+
+function renderedCourseText(cards: string[], limits: ExcerptLimits) {
+  const visibleCards = cards.map(lines).filter((card) => card.length > 1 && COURSE_DETAILS.test(card.join(" ")));
+  if (!visibleCards.length) return null;
+  const count = Math.min(visibleCards.length, MAX_COURSES);
+  const cardLimit = Math.floor((MAX_PAGE_CHARS - 200) / count) - 2;
+  const excerpts = visibleCards.slice(0, count).map((card) => {
+    const full = card.join("\n");
+    if (full.length <= cardLimit) return full;
+    const detailBudget = Math.min(350, Math.floor(cardLimit / 3));
+    const prices = clipped(limits, card.filter((value) => COURSE_PRICE.test(value)).join("\n"), 100);
+    const conditions = clipped(limits, card.slice(1).filter((value) => value.length <= 125 && COURSE_CONDITION.test(value)).join("\n"), detailBudget - prices.length - 1);
+    const details = [prices, conditions].filter(Boolean).join("\n");
+    const prefix = clipped(limits, full, cardLimit - details.length - 1);
+    return [prefix, details].filter(Boolean).join("\n");
+  });
+  if (count < visibleCards.length) {
+    limits.truncated = true;
+    excerpts.push(`表示されたコースカード ${visibleCards.length}件中、先頭${count}件を抜粋しました。`);
+  }
+  return excerpts.join("\n\n");
+}
+
+function renderedOfficialText(body: string, limits: ExcerptLimits) {
+  const visibleLines = lines(body);
+  const full = visibleLines.join("\n");
+  if (full.length < 60 || !RESTAURANT_DETAILS.test(full)) return null;
+  if (full.length <= MAX_PAGE_CHARS) return full;
+  const prefix = clipped(limits, full, 12_800);
+  const details = [...new Set(visibleLines)].filter((value) => RESTAURANT_DETAILS.test(value) && !prefix.includes(value));
+  return [prefix, clipped(limits, details.join("\n"), 3_000)].filter(Boolean).join("\n\n");
+}
+
+export function extractRenderedDirectPage(kind: DirectPageKind, pageTitle: string, body: string, items: string[]): PageExcerpt | null {
+  const title = line(pageTitle);
+  const visibleBody = line(body);
+  if (!title || ERROR_TITLE.test(title) || !visibleBody) return null;
+
+  const limits = { truncated: false };
+  if (kind === "official") return pageExcerpt(title, renderedOfficialText(body, limits), limits);
+
+  // A browser can return textContent for a queried element hidden by its own
+  // styles. Only use text that is also present in the rendered body's innerText.
+  const visibleItems = items.filter((item) => {
+    const text = line(item);
+    return text !== "" && visibleBody.includes(text);
+  });
+  const text = kind === "tabelog-store" ? renderedStoreText(visibleItems, limits) : renderedCourseText(visibleItems, limits);
+  return pageExcerpt(title, text, limits);
 }

@@ -173,9 +173,9 @@ assert(errorAgentHtml.includes('取得時の制約')&&errorAgentHtml.includes('�
 const directPageHtml=render(agentModule.exports.AgentsTab,{selected:{report:JSON.stringify(reviewedClaims),agents:[{...syntheticAgent,directPages:[
   {kind:'official',url:'https://example.com/official',status:'retrieved',retrievedAt:'2026-11-20T00:00:00.000Z'},
   {kind:'tabelog-store',url:'https://example.com/store',status:'unavailable',reason:'ページがHTTP 403を返しました'},
-  {kind:'tabelog-courses',url:'https://example.com/courses',status:'retrieved',truncated:true},
+  {kind:'tabelog-courses',url:'https://example.com/courses',status:'retrieved',method:'browser',truncated:true},
 ]}]}});
-for(const label of ['指定ページの本文取得状況','本文を取得できず、検索で補足','ページがHTTP 403を返しました','本文を一部取得']) assert(directPageHtml.includes(label),label);
+for(const label of ['指定ページの本文取得状況','本文を取得できず、検索で補足','ページがHTTP 403を返しました','本文を一部取得（ブラウザー）']) assert(directPageHtml.includes(label),label);
 assert(directPageHtml.includes('href="https://example.com/official"')&&/datetime="2026-11-20T00:00:00\.000Z"/i.test(directPageHtml));
 const newFormat=typeof report.qualityGate?.version === 'number' && report.qualityGate.version >= 2;
 assert.equal(actual.includes('次の解析から適用されます'),!newFormat);

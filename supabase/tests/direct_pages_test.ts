@@ -1,12 +1,15 @@
 import { strict as assert } from "node:assert";
 import { buildSynthesisPrompt, executeJob } from "../functions/restaurant-analysis/core.ts";
-import { directPageReceipts, loadDirectPages } from "../functions/restaurant-analysis/direct-pages.ts";
+import { directPageEvidence, directPageReceipts, loadDirectPages } from "../functions/restaurant-analysis/direct-pages.ts";
 
 const officialUrl = "https://www.bistro-cavacava.com/";
 const officialAlias = "https://bistro-cavacava.com/";
 const storeUrl = "https://tabelog.com/tokyo/A1309/A130903/13245351/";
 const courseUrl = storeUrl + "party/";
 const selectedTabelog = [{ id: "tabelog", name: "食べログ", url: storeUrl }];
+const renderer = { accountId: "abcdef0123456789abcdef0123456789", token: "browser-test-token" };
+const scrapeUrl = `https://api.cloudflare.com/client/v4/accounts/${renderer.accountId}/browser-rendering/scrape?cacheTTL=0`;
+const displayedCourse = "Bコース 全6品\n前菜からデザートまで全8品をご用意します。\n8,800円\n2名様から";
 
 function htmlResponse(content: string, title: string) {
   const html = `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${title}</title></head><body>${content}</body></html>`;
@@ -58,6 +61,47 @@ function directFetch(routes: Record<string, () => Response>) {
       assert.equal(new Headers(options?.headers).has(name), false);
     }
     return routes[url]?.() ?? new Response(null, { status: 404 });
+  };
+  return { calls, get };
+}
+
+function renderedPage(
+  url: string,
+  selector: string,
+  elements: string[],
+  body = elements.join("\n"),
+  redirectChain?: { url: string; status: number; headers: { location: string } }[],
+) {
+  return Response.json({
+    success: true,
+    meta: { finalUrl: url, status: 200, title: "ビストロ サヴァサヴァ 掲載情報", redirectChain },
+    result: [
+      { selector: "body", results: [{ text: body, width: 800, height: 100 }] },
+      ...(selector === "body" ? [] : [{ selector, results: elements.map(text => ({ text, width: 400, height: 100 })) }]),
+    ],
+  });
+}
+
+function browserFetch(direct: ReturnType<typeof directFetch>, render: (url: string) => Response | Promise<Response>) {
+  const calls: string[] = [];
+  const get: typeof fetch = async (target, options) => {
+    if (String(target) !== scrapeUrl) return direct.get(target, options);
+    assert.equal(options?.method, "POST");
+    assert.equal(options?.redirect, "error");
+    assert.equal(new Headers(options?.headers).get("authorization"), `Bearer ${renderer.token}`);
+    assert.equal(new Headers(options?.headers).has("cookie"), false);
+    assert.ok(options?.signal instanceof AbortSignal);
+    const request = JSON.parse(String(options?.body));
+    assert.ok(direct.calls.includes(request.url), "a known page must be tried directly before opening a browser");
+    assert.deepEqual(request.elements.map((element: { selector: string }) => element.selector), request.url === courseUrl
+      ? ["body", ".rstdtl-course-list"] : request.url === storeUrl ? ["body", ".rstinfo-table tr"] : ["body"]);
+    const patterns = request.allowRequestPattern.map((value: string) => new RegExp(value));
+    const allowed = (value: string) => patterns.some((pattern: RegExp) => pattern.test(value));
+    assert.equal(allowed(request.url), true);
+    assert.equal(allowed("https://tabelog.com.example.test/"), false);
+    assert.equal(allowed("https://127.0.0.1/"), false);
+    calls.push(request.url);
+    return await render(request.url);
   };
   return { calls, get };
 }
@@ -199,6 +243,108 @@ Deno.test("a long course list reports truncation and preserves the price and con
   assert.equal(directPageReceipts(pages).find(page => page.kind === "tabelog-courses")?.truncated, true);
 });
 
+Deno.test("browser fallback opens only failed direct targets and records the URL and time of displayed text", async () => {
+  const direct = directFetch({
+    [officialUrl]: officialPage,
+    [storeUrl]: storefrontPage,
+    [courseUrl]: () => new Response(null, { status: 503 }),
+  });
+  const browser = browserFetch(direct, () => renderedPage(courseUrl, ".rstdtl-course-list",
+    [displayedCourse, "表示画面にない行に含まれる架空の価格99,999円"], displayedCourse));
+  const before = Date.now();
+  const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer);
+  assert.deepEqual(browser.calls, [courseUrl]);
+  assert.deepEqual(direct.calls.sort(), [officialUrl, storeUrl, courseUrl].sort());
+  const page = pages.find(item => item.kind === "tabelog-courses");
+  const receipt = directPageReceipts(pages).find(item => item.kind === "tabelog-courses");
+  assert.equal(page?.status, "retrieved");
+  assert.equal(page?.method, "browser");
+  assert.equal(page?.url, courseUrl);
+  assert.match(page?.text ?? "", /全6品[\s\S]*全8品[\s\S]*8,800円[\s\S]*2名様から/);
+  assert.doesNotMatch(page?.text ?? "", /99,999円/);
+  const checkedAt = Date.parse(page?.retrievedAt ?? "");
+  assert.ok(before <= checkedAt && checkedAt <= Date.now());
+  assert.equal(receipt?.retrievedAt, page?.retrievedAt);
+  assert.equal(receipt?.method, "browser");
+  assert.ok(receipt && !("text" in receipt));
+  const evidence = directPageEvidence(pages);
+  assert.match(evidence, /"method":"browser"/);
+  assert.ok(evidence.includes(`"url":"${courseUrl}"`) && evidence.includes(`"retrievedAt":"${page?.retrievedAt}"`));
+  assert.ok(pages.filter(item => item.kind !== "tabelog-courses").every(item => item.status === "retrieved" && item.method !== "browser"));
+});
+
+Deno.test("unsupported or unselected URLs never start a browser search", async () => {
+  const direct = directFetch({ [officialUrl]: officialPage });
+  const browser = browserFetch(direct, () => { throw new Error("browser must not be called"); });
+  const unknown = await loadDirectPages("https://example.test/", [{ id: "tabelog", url: "https://example.test/" }], browser.get, [], renderer);
+  const unselected = await loadDirectPages(officialUrl, [{ id: "custom-reference", url: courseUrl }], browser.get, [], renderer);
+  assert.ok(unknown.every(item => item.status === "search_only"));
+  assert.deepEqual(unselected.map(item => item.kind), ["official"]);
+  assert.deepEqual(direct.calls, [officialUrl]);
+  assert.deepEqual(browser.calls, []);
+});
+
+Deno.test("browser fallback keeps the final validated official alias as its source URL", async () => {
+  const direct = directFetch({ [officialUrl]: () => new Response(null, { status: 503 }) });
+  const browser = browserFetch(direct, () => renderedPage(officialAlias, "body", [],
+    "ビストロ サヴァサヴァのお知らせ。営業時間は18時から22時です。火曜日は定休日です。貸切は人数とご予算に応じてご相談ください。ご予約は店舗にお問い合わせください。",
+    [{ url: officialUrl, status: 301, headers: { location: officialAlias } }]));
+  const [page] = await loadDirectPages(officialUrl, [], browser.get, [], renderer);
+  assert.deepEqual(browser.calls, [officialUrl]);
+  assert.equal(page.status, "retrieved");
+  assert.equal(page.method, "browser");
+  assert.equal(page.url, officialAlias);
+  assert.match(page.text ?? "", /貸切は人数とご予算に応じてご相談/);
+});
+
+Deno.test("browser fallback failures preserve the original direct failure and contribute no page evidence", async () => {
+  const cases: Array<(url: string) => Response | Promise<Response>> = [
+    () => renderedPage(storeUrl, ".rstdtl-course-list", [displayedCourse]),
+    () => renderedPage(courseUrl.replace("13245351", "13245352"), ".rstdtl-course-list", [displayedCourse]),
+    () => renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse], displayedCourse, [
+      { url: courseUrl, status: 302, headers: { location: "https://example.test/other-page" } },
+    ]),
+    () => renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse], "ページを読み込めません"),
+    async () => {
+      const page = await renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse]).json();
+      return Response.json({ ...page, meta: { ...page.meta, status: 403 } });
+    },
+    () => new Response(null, { status: 403 }),
+    () => Promise.reject(new DOMException("test deadline", "TimeoutError")),
+  ];
+  for (const render of cases) {
+    const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: storefrontPage, [courseUrl]: () => new Response(null, { status: 503 }) });
+    const browser = browserFetch(direct, render);
+    const pages = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer);
+    const courses = pages.find(item => item.kind === "tabelog-courses");
+    assert.deepEqual(browser.calls, [courseUrl]);
+    assert.equal(courses?.status, "unavailable");
+    assert.match(courses?.reason ?? "", /HTTP 503/);
+    assert.match(courses?.reason ?? "", /ブラウザ/);
+    assert.equal(courses?.retrievedAt, undefined);
+    assert.equal(courses?.text, undefined);
+    assert.doesNotMatch(directPageEvidence(pages), /全6品|test deadline|browser-test-token/);
+  }
+});
+
+Deno.test("a successful browser result is reused on retry only for the same page", async () => {
+  const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: storefrontPage, [courseUrl]: () => new Response(null, { status: 503 }) });
+  const browser = browserFetch(direct, () => renderedPage(courseUrl, ".rstdtl-course-list", [displayedCourse]));
+  const saved = await loadDirectPages(officialUrl, selectedTabelog, browser.get, [], renderer);
+  const rerun = directFetch({});
+  const browserRetry = browserFetch(rerun, () => { throw new Error("already retrieved"); });
+  assert.deepEqual(await loadDirectPages(officialUrl, selectedTabelog, browserRetry.get, saved, renderer), saved);
+  assert.deepEqual(rerun.calls, []);
+  assert.deepEqual(browserRetry.calls, []);
+
+  const changed = directFetch({ [courseUrl]: coursesPage });
+  const wrongPage = saved.map(item => item.kind === "tabelog-courses" ? { ...item, url: storeUrl } : item);
+  const reloaded = await loadDirectPages(officialUrl, selectedTabelog, changed.get, wrongPage, renderer);
+  assert.deepEqual(changed.calls, [courseUrl]);
+  assert.equal(reloaded.find(item => item.kind === "tabelog-courses")?.status, "retrieved");
+  assert.notEqual(reloaded.find(item => item.kind === "tabelog-courses")?.method, "browser");
+});
+
 function gourmetDatabase() {
   const outputs: any[] = [];
   const checkpoints: any[] = [];
@@ -283,5 +429,67 @@ Deno.test("the gourmet worker supplies original page text to Gemini and preserve
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) Deno.env.delete("GEMINI_API_KEY");
     else Deno.env.set("GEMINI_API_KEY", previousKey);
+  }
+});
+
+Deno.test("the gourmet worker checkpoints browser evidence before sending its text, URL, and time to Gemini", async () => {
+  const previousFetch = globalThis.fetch;
+  const testEnv = {
+    GEMINI_API_KEY: "test-gemini-key",
+    RESTAURANT_BROWSER_ACCOUNT_ID: renderer.accountId,
+    RESTAURANT_BROWSER_API_TOKEN: renderer.token,
+  };
+  const savedEnv = Object.keys(testEnv).map(name => [name, Deno.env.get(name)] as const);
+  const { db, checkpoints, outputs } = gourmetDatabase();
+  const direct = directFetch({ [officialUrl]: officialPage, [storeUrl]: () => new Response(null, { status: 503 }), [courseUrl]: coursesPage });
+  const browser = browserFetch(direct, () => renderedPage(storeUrl, ".rstinfo-table tr", [
+    "店名\tビストロ サヴァサヴァ", "住所\t東京都新宿区荒木町", "貸切\t不可",
+  ]));
+  const input = { storeName: "BistroCAVACAVA", storeUrl: officialUrl, groupName: null, selectedSites: selectedTabelog };
+  const requests: string[] = [];
+  globalThis.fetch = async (target, options) => {
+    const url = new URL(String(target));
+    if (url.hostname !== "generativelanguage.googleapis.com") return browser.get(target, options);
+    assert.equal(new Headers(options?.headers).get("x-goog-api-key"), testEnv.GEMINI_API_KEY);
+    assert.equal(new Headers(options?.headers).has("authorization"), false);
+    const checkpointed = checkpoints[0]?.p_output?.directPages?.find((page: { kind: string }) => page.kind === "tabelog-store");
+    assert.equal(checkpointed?.method, "browser");
+    assert.match(checkpointed?.text ?? "", /貸切[\s：:]*不可/);
+    const payload = JSON.parse(String(options?.body));
+    const prompt = payload.contents.flatMap((content: { parts: { text: string }[] }) => content.parts).map((part: { text: string }) => part.text).join("\n");
+    assert.match(prompt, /指定ページから取得した本文/);
+    assert.ok(prompt.includes(`"url":"${storeUrl}"`) && prompt.includes(`"retrievedAt":"${checkpointed.retrievedAt}"`));
+    assert.ok(prompt.includes('"method":"browser"') && prompt.includes("貸切") && prompt.includes("不可"));
+    assert.ok(!prompt.includes(renderer.token));
+    requests.push(prompt);
+    return Response.json({
+      candidates: [{
+        content: { parts: [{ text: "媒体調査は完了しました。\n<MENU_INVENTORY>[]</MENU_INVENTORY>" }] },
+        finishReason: "STOP",
+      }],
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 20 },
+    });
+  };
+  try {
+    for (const [name, value] of Object.entries(testEnv)) Deno.env.set(name, value);
+    await executeJob(db, {
+      id: "gourmet-job", job_key: "gourmet", lease_token: "worker-lease", attempts: 1, max_attempts: 3, output: {},
+    }, { id: "run-id", user_id: "owner-id", input });
+    assert.deepEqual(browser.calls, [storeUrl]);
+    assert.equal(requests.length, 1);
+    assert.equal(outputs.length, 1);
+    assert.equal(outputs[0].p_error, null);
+    const agent = outputs[0].p_output;
+    assert.equal(agent.status, "done");
+    assert.ok(agent.sources.includes(storeUrl));
+    const synthesis = buildSynthesisPrompt(input, [agent]);
+    assert.match(synthesis, /"method":"browser"/);
+    assert.match(synthesis, /貸切[\s\S]*不可/);
+  } finally {
+    globalThis.fetch = previousFetch;
+    for (const [name, value] of savedEnv) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
   }
 });

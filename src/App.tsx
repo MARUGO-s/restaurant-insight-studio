@@ -15,6 +15,7 @@ type DirectPageReceipt = {
   kind: "official" | "tabelog-store" | "tabelog-courses";
   url: string;
   status: "retrieved" | "unavailable" | "search_only";
+  method?: "browser";
   retrievedAt?: string;
   reason?: string;
   truncated?: boolean;
@@ -156,7 +157,9 @@ function DirectPageStatus({ pages }: { pages?: DirectPageReceipt[] }) {
     <b>指定ページの本文取得状況</b>
     <ul>{pages.map((page) => <li key={page.kind}>
       {page.url.startsWith("https://") ? <a href={page.url} target="_blank" rel="noreferrer">{labels[page.kind]} ↗</a> : <span>{labels[page.kind]}</span>}
-      <span>{page.status === "retrieved" ? (page.truncated ? "本文を一部取得" : "本文を取得") : page.status === "unavailable" ? "本文を取得できず、検索で補足" : "検索で確認"}</span>
+      <span>{page.status === "retrieved"
+        ? `${page.truncated ? "本文を一部取得" : "本文を取得"}${page.method === "browser" ? "（ブラウザー）" : ""}`
+        : page.status === "unavailable" ? "本文を取得できず、検索で補足" : "検索で確認"}</span>
       {page.retrievedAt && <time dateTime={page.retrievedAt}>{dateLabel(page.retrievedAt)}</time>}
       {page.reason && <span className="direct-page-reason">{page.reason}</span>}
     </li>)}</ul>
