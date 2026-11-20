@@ -5,6 +5,19 @@ type FeeRecord = {
     transport_error?: string; reconciliation_status?: string };
 };
 
+export const usdJpyReference = {
+  yenPerDollar: 159.59,
+  date: "2026年11月19日",
+  source: "https://www.boj.or.jp/statistics/market/forex/fxdaily/fxlist/fx261119.pdf",
+};
+const yenFormat = new Intl.NumberFormat("ja-JP", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+export function formatYenEstimate(usd: number | null | undefined) {
+  if (usd == null) return "料金未確定";
+  const yen = usd * usdJpyReference.yenPerDollar;
+  return yen > 0 && yen < 0.01 ? "0.01円未満" : `${yenFormat.format(yen)}円`;
+}
+
 export function costExplanation(event: FeeRecord): { label: string; reason: string } {
   const m = event.request_metadata ?? {};
   if (event.list_price_usd != null) return { label: event.request_status === "failed" ? "APIで失敗" : "利用量を計測",
@@ -27,5 +40,5 @@ export function costExplanation(event: FeeRecord): { label: string; reason: stri
   if (["not_found", "usage_missing"].includes(m.reconciliation_status ?? "")) reason += " 保存済みの応答からも利用量を取得できませんでした。";
   else if (m.reconciliation_status === "unavailable") reason += " 提供元への再確認は一時的にできませんでした。";
   else if (m.reconciliation_status === "pending") reason += " 提供元では処理結果がまだ確定していません。";
-  return { label: "料金未確定", reason: `${reason} 0ドルとは限りません。` };
+  return { label: "料金未確定", reason: `${reason} 料金が発生している可能性があります。` };
 }

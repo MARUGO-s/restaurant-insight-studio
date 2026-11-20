@@ -1,11 +1,17 @@
 import { strict as assert } from "node:assert";
-import { costExplanation } from "../../src/lib/costs.ts";
+import { costExplanation, formatYenEstimate } from "../../src/lib/costs.ts";
 const event = { request_status: "unknown", measurement_status: "unknown", list_price_usd: null, usage: {}, request_metadata: { http_status: 200 } };
 Deno.test("an interrupted 200 response is uncertain, not missing provider support or free", () => {
   const result = costExplanation(event);
   assert.equal(result.label, "料金未確定");
   assert.match(result.reason, /完了通知/);
-  assert.match(result.reason, /0ドルとは限りません/);
+  assert.match(result.reason, /料金が発生している可能性があります/);
+});
+Deno.test("yen display distinguishes tiny nonzero charges, exact zero, and unknown costs", () => {
+  assert.equal(formatYenEstimate(0.000001), "0.01円未満");
+  assert.equal(formatYenEstimate(0), "0.00円");
+  assert.equal(formatYenEstimate(null), "料金未確定");
+  assert.equal(formatYenEstimate(100), "15,959.00円");
 });
 Deno.test("timeout, token shortage and recovered costs have distinct explanations", () => {
   assert.match(costExplanation({ ...event, request_metadata: { duration_ms: 300001, timeout_ms: 300000 } }).reason, /上限/);

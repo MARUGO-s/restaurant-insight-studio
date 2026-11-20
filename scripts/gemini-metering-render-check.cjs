@@ -46,10 +46,10 @@ assert.equal(ledgerCheck.status, 0, "Offline Gemini metering failed");
 const scenarios = JSON.parse(ledgerCheck.stdout);
 assert.ok(Array.isArray(scenarios));
 const expected = new Map([
-  ["seven_distinct", ["Google検索 7件", "$0.137720"]],
-  ["seven_with_blank_and_duplicates", ["Google検索 3件", "$0.081720"]],
-  ["three_distinct", ["Google検索 3件", "$0.081720"]],
-  ["all_blank", ["Google検索 0件", "$0.039720"]],
+  ["seven_distinct", ["Google検索 7件", "21.98円"]],
+  ["seven_with_blank_and_duplicates", ["Google検索 3件", "13.04円"]],
+  ["three_distinct", ["Google検索 3件", "13.04円"]],
+  ["all_blank", ["Google検索 0件", "6.34円"]],
   ["missing_search_metadata", [undefined, "料金未確定"]],
 ]);
 
@@ -89,9 +89,20 @@ globalThis.Date = new Proxy(NativeDate, {
   construct: (target, args) => Reflect.construct(target, args.length ? args : ["2026-11-20T12:00:00Z"]),
 });
 try {
-  assertMonthlyTotal([zeroSearch], "$0.039720", "APIの返却値を記録済み");
-  assertMonthlyTotal([unpriced], "$0.000000", "料金未確定 1件を除く");
-  assertMonthlyTotal([zeroSearch, unpriced, priorMonth], "$0.039720", "料金未確定 1件を除く");
+  assertMonthlyTotal([zeroSearch], "6.34円", "APIの返却値を記録済み");
+  assertMonthlyTotal([unpriced], "0.00円", "料金未確定 1件を除く");
+  assertMonthlyTotal([zeroSearch, unpriced, priorMonth], "6.34円", "料金未確定 1件を除く");
+
+  const summary = renderCosts([
+    { ...zeroSearch, run_id: "test-run" },
+    { ...unpriced, run_id: "test-run" },
+    { ...rowsByLabel.get("three_distinct"), operation: "followup_question" },
+  ]);
+  assert.match(summary, /1ドル＝159\.59円/);
+  assert.match(summary, /日本銀行の中心相場（2026年11月19日）/);
+  assert.match(summary, /<span>質問への回答<\/span><b>13\.04円<\/b>/);
+  assert.match(summary, /<strong>判明分 6\.34円 \+ 未算定<\/strong>/);
+  assert.match(summary, /class="cost-run-breakdown"><span>Google Gemini gemini-3\.8-flash: 6\.34円<\/span>/);
 } finally {
   globalThis.Date = NativeDate;
 }
