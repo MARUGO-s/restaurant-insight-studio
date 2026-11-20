@@ -54,6 +54,39 @@ Deno.test("X search rates use per-post/profile units", () => {
   const result = readUsage("xAI", "grok-4.7", { usage: { input_tokens: 0, output_tokens: 0, server_side_tool_usage_details: { x_search_calls: 1, x_posts_fetched: 100, x_users_fetched: 2 } } });
   assert.equal(result.cost, 0.52);
 });
+Deno.test("Gemini bills each non-empty Google Search query once per response", () => {
+  const result = readUsage("Google Gemini", "gemini-3.8-flash", {
+    usageMetadata: { promptTokenCount: 1000, cachedContentTokenCount: 200, candidatesTokenCount: 100, thoughtsTokenCount: 50 },
+    candidates: [
+      { groundingMetadata: { webSearchQueries: ["Bistro CAVA CAVA", "", "Bistro CAVA CAVA", "\t "] } },
+      { groundingMetadata: { webSearchQueries: ["  Bistro CAVA CAVA\n", "Bistro CAVA CAVA コース"] } },
+      {},
+    ],
+  }, "2026-11-20");
+
+  assert.ok("google_search_queries" in result.usage);
+  assert.equal(result.usage.google_search_queries, 2);
+  assert.equal(result.measurementStatus, "complete");
+  assert.ok(result.cost !== null && Math.abs(result.cost - 0.0291775) < 1e-10);
+});
+Deno.test("Gemini distinguishes blank search queries from missing search metadata", () => {
+  const model = "gemini-3.8-flash", priceDate = "2026-11-20";
+  const usageMetadata = { promptTokenCount: 0, candidatesTokenCount: 0, toolUsePromptTokenCount: 1 };
+  const blank = readUsage("Google Gemini", model, {
+    usageMetadata,
+    candidates: [{ groundingMetadata: { webSearchQueries: ["", " \n"] } }],
+  }, priceDate);
+  assert.ok("google_search_queries" in blank.usage);
+  assert.equal(blank.usage.google_search_queries, 0);
+  assert.equal(blank.measurementStatus, "complete");
+  assert.equal(blank.cost, 0.00000075);
+
+  const missing = readUsage("Google Gemini", model, { usageMetadata, candidates: [{}] }, priceDate);
+  assert.ok("google_search_queries" in missing.usage);
+  assert.equal(missing.usage.google_search_queries, null);
+  assert.equal(missing.measurementStatus, "partial");
+  assert.equal(missing.cost, null);
+});
 Deno.test("worker rejects malformed unauthenticated dispatch before any provider call", async () => {
   const response = await handleWorker(new Request("https://example.test", { method: "POST", body: JSON.stringify({ jobId: "wrong", dispatchToken: "wrong" }) }));
   assert.equal(response.status, 401);

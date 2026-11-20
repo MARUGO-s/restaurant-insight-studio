@@ -180,8 +180,11 @@ function readUsage(provider: string, model: string, data: any, pricingDate = pri
     cachedInputTokens = asCount(usage.cachedContentTokenCount) ?? 0;
     const candidates = asCount(usage.candidatesTokenCount), thoughts = asCount(usage.thoughtsTokenCount) ?? 0;
     outputTokens = candidates === null ? null : candidates + thoughts;
-    const candidatesMeta = (data?.candidates ?? []).map((candidate: any) => candidate?.groundingMetadata?.webSearchQueries).filter(Array.isArray);
-    googleSearchQueries = candidatesMeta.length ? candidatesMeta.reduce((sum: number, list: unknown[]) => sum + list.length, 0) : ((usage.toolUsePromptTokenCount ?? 0) > 0 ? null : 0);
+    const queryLists: unknown[][] = (data?.candidates ?? []).map((candidate: any) => candidate?.groundingMetadata?.webSearchQueries).filter(Array.isArray);
+    const distinctQueries = new Set(queryLists.flat()
+      .filter((query): query is string => typeof query === "string")
+      .map(query => query.trim()).filter(Boolean));
+    googleSearchQueries = queryLists.length ? distinctQueries.size : ((usage.toolUsePromptTokenCount ?? 0) > 0 ? null : 0);
   } else {
     inputTokens = asCount(usage.input_tokens ?? usage.prompt_tokens);
     cachedInputTokens = asCount(usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens) ?? 0;
