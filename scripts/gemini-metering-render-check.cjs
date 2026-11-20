@@ -56,12 +56,12 @@ const expected = new Map([
 globalThis.fetch = noNetwork;
 // Expose the real cost page to the test without changing the production module.
 const { CostPage } = loadComponent("App.tsx", "\nexport { CostPage };\n");
+const renderCosts = (costs) => renderToStaticMarkup(React.createElement(CostPage, {
+  reports: [], costs, loading: false, error: "", onRefresh: noNetwork,
+}));
 for (const { label, row } of scenarios) {
   assert.ok(expected.has(label), `Unexpected or repeated case ${label}`);
-  const html = renderToStaticMarkup(React.createElement(CostPage, {
-    reports: [], costs: [row], loading: false, error: "", onRefresh: noNetwork,
-  }));
-  const ledger = html.split('class="cost-event-list"')[1];
+  const ledger = renderCosts([row]).split('class="cost-event-list"')[1];
   assert.ok(ledger, "API call ledger is missing");
   assert.equal((ledger.match(/class="cost-event"/g) ?? []).length, 1);
   assert.match(ledger, /グルメ媒体調査/);
@@ -71,4 +71,28 @@ for (const { label, row } of scenarios) {
   expected.delete(label);
 }
 assert.equal(expected.size, 0, `Missing cases ${[...expected.keys()].join(", ")}`);
-console.log("Gemini search counts and totals match the API call ledger display");
+
+const rowsByLabel = new Map(scenarios.map(({ label, row }) => [label, row]));
+const zeroSearch = rowsByLabel.get("all_blank");
+const unpriced = rowsByLabel.get("missing_search_metadata");
+const priorMonth = { ...rowsByLabel.get("three_distinct"), created_at: "2026-10-20T12:00:00Z" };
+
+function assertMonthlyTotal(costs, amount, note) {
+  const summary = renderCosts(costs).match(/<span>今月の標準料金積算<\/span><b>([^<]+)<\/b><small>([^<]+)<\/small>/);
+  assert.ok(summary, "Monthly cost summary is missing");
+  assert.deepEqual(summary.slice(1), [amount, note]);
+}
+
+// Keep the renderer in the ledger fixture's month across test dates and time zones.
+const NativeDate = Date;
+globalThis.Date = new Proxy(NativeDate, {
+  construct: (target, args) => Reflect.construct(target, args.length ? args : ["2026-11-20T12:00:00Z"]),
+});
+try {
+  assertMonthlyTotal([zeroSearch], "$0.039720", "APIの返却値を記録済み");
+  assertMonthlyTotal([unpriced], "$0.000000", "料金未確定 1件を除く");
+  assertMonthlyTotal([zeroSearch, unpriced, priorMonth], "$0.039720", "料金未確定 1件を除く");
+} finally {
+  globalThis.Date = NativeDate;
+}
+console.log("Gemini search counts and prices match the call ledger and monthly summary");
