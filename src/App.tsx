@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { costExplanation, formatYenEstimate, usdJpyReference } from "./lib/costs";
 import { StoreNameInput, officialStoreUrl, STORE_CATALOG } from "./StoreNameInput";
+import { groupReportsByStore, officialDisplayName, officialDisplayUrl, storeIdentityKey } from "./lib/store-identity";
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
@@ -27,15 +28,24 @@ type SiteTarget = { id: string; name: string; url: string };
 type Report = {
   id: string; runId?: string | null; storeName: string; storeUrl: string; groupName: string | null; createdAt: string;
   selectedSites?: SiteTarget[]; researchFocus?: string; deletedAt?: string | null; agents: Agent[]; critique: string; critiqueSources: string[]; report: string; reportSources: string[]; followups: Followup[];
-  source?: string; sourceUrl?: string | null; shared?: boolean;
+  source?: string; sourceUrl?: string | null; shared?: boolean; sourceReportIds?: string[];
 };
-type ReportFilter = "all" | "checker" | "app";
+type ReportFilter = "all" | "checker" | "app" | "merged";
 function isSharedReport(report: { source?: string; shared?: boolean }) {
   return report.shared === true || report.source === "gourmet_checker";
 }
+function isMergedReport(report: { source?: string }) {
+  return report.source === "merged";
+}
+function reportKind(report: { source?: string; shared?: boolean }): "checker" | "app" | "merged" {
+  if (isMergedReport(report)) return "merged";
+  if (isSharedReport(report)) return "checker";
+  return "app";
+}
 function ReportSourceBadge({ report, size = "sm" }: { report: { source?: string; shared?: boolean }; size?: "sm" | "md" }) {
-  const checker = isSharedReport(report);
-  return <span className={`source-badge source-badge-${checker ? "checker" : "app"}${size === "md" ? " source-badge-md" : ""}`}>{checker ? "Grok Bot" : "アプリ分析"}</span>;
+  const kind = reportKind(report);
+  const label = kind === "merged" ? "統合版" : kind === "checker" ? "Grok Bot" : "アプリ分析";
+  return <span className={`source-badge source-badge-${kind}${size === "md" ? " source-badge-md" : ""}`}>{label}</span>;
 }
 type CostEvent = {
   id: string; user_id: string; run_id: string | null; report_id: string | null; operation: string; provider: string;
@@ -55,7 +65,7 @@ type ReportAction = "trash_report" | "restore_report" | "delete_report";
 type ReportState = { state: "active" | "trashed" | "deleted" | "missing"; report?: Report };
 type AnalysisJob = { key: string; status: "pending" | "running" | "done" | "failed"; attempts: number; maxAttempts: number; label: string; error?: string; directPages?: DirectPageReceipt[]; continuationCount?: number };
 type RunState = { status: "running" | "done" | "failed" | "trashed" | "deleted"; progressStage: string; startedAt?: string; deadlineAt?: string; researchFocus?: string; jobs?: AnalysisJob[]; report?: Report; error?: string; canRegenerateSynthesis?: boolean; synthesisRevision?: string };
-type ActiveRun = { runId: string; startedAt: string; storeName: string; researchFocus?: string };
+type ActiveRun = { runId: string; startedAt: string; storeName: string; researchFocus?: string; kind?: "analyze" | "merge" };
 const RESEARCH_FOCUS_LIMIT = 2000;
 const RUN_STAGES = [
   { key: "market", label: "市場・競合調査" },
@@ -65,6 +75,7 @@ const RUN_STAGES = [
   { key: "synthesis", label: "反証の確認・レポート統合" },
 ];
 function agentTitle(id: string) {
+  if (id === "merge" || id.startsWith("merge-source-")) return "レポート統合";
   return RUN_STAGES.find((stage) => stage.key === id)?.label ?? (id.startsWith("social") ? "X・SNSの評判" : "専門調査");
 }
 const activeRunStorageKey = (userId: string) => `restaurantInsightActiveRun:${userId}`;
@@ -72,7 +83,7 @@ function readActiveRun(userId: string): ActiveRun | null {
   try {
     const saved = JSON.parse(localStorage.getItem(activeRunStorageKey(userId)) || "null");
     return saved && typeof saved.runId === "string" && typeof saved.startedAt === "string" && typeof saved.storeName === "string"
-      ? { runId: saved.runId, startedAt: saved.startedAt, storeName: saved.storeName, researchFocus: typeof saved.researchFocus === "string" ? saved.researchFocus.slice(0, RESEARCH_FOCUS_LIMIT) : undefined } : null;
+      ? { runId: saved.runId, startedAt: saved.startedAt, storeName: saved.storeName, researchFocus: typeof saved.researchFocus === "string" ? saved.researchFocus.slice(0, RESEARCH_FOCUS_LIMIT) : undefined, kind: saved.kind === "merge" ? "merge" : "analyze" } : null;
   } catch { return null; }
 }
 function saveActiveRun(userId: string, run: ActiveRun) {
@@ -187,14 +198,17 @@ function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onR
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   const elapsed = Math.max(0, Math.floor((now - new Date(state?.startedAt || run.startedAt).getTime()) / 1000));
   const elapsedLabel = Number.isFinite(elapsed) ? `${Math.floor(elapsed / 60)}分${String(elapsed % 60).padStart(2, "0")}秒` : "確認中";
-  const jobs: AnalysisJob[] = RUN_STAGES.map((stage) => state?.jobs?.find((job) => job.key === stage.key) ?? { ...stage, status: "pending", attempts: 0, maxAttempts: 3 });
+  const isMerge = run.kind === "merge" || !!state?.jobs?.some((job) => job.key === "merge_reports");
+  const jobs: AnalysisJob[] = isMerge
+    ? (state?.jobs?.length ? state.jobs : [{ key: "merge_reports", label: "レポートの統合", status: "running", attempts: 0, maxAttempts: 4 }])
+    : RUN_STAGES.map((stage) => state?.jobs?.find((job) => job.key === stage.key) ?? { ...stage, status: "pending", attempts: 0, maxAttempts: 3 });
   const failed = state?.status === "failed";
-  const regenerationAvailable = failed && state?.canRegenerateSynthesis === true && !!state.synthesisRevision;
+  const regenerationAvailable = !isMerge && failed && state?.canRegenerateSynthesis === true && !!state.synthesisRevision;
   const done = jobs.filter((job) => job.status === "done").length;
   const statusNames = { pending: "待機中", running: "調査中", done: "完了", failed: "未完了" };
-  return <section className={`panel durable-progress ${failed ? "has-failure" : ""}`} aria-label="解析の進行状況">
-    <header><div><span className="panel-kicker">RESEARCH PROGRESS</span><h3>{failed ? "未完了の調査があります" : notice ? "調査の状況を確認しています" : state?.progressStage === "checking" ? "反証を確認し、総合レポートを作成しています" : "専門AIが調査を進めています"}</h3><p>{run.storeName || "店舗分析"} · 経過 {elapsedLabel} · {done}/{jobs.length}段階完了</p></div>{polling && <i className="spinner large"/>}</header>
-    <p className="run-guidance">調査結果は段階ごとに保存されます。画面を閉じても調査は続き、同じアカウントで開くと進行状況を確認できます。X調査は直近と過去を分けて実行し、再試行を含む解析には30分以上かかる場合があります。</p>
+  return <section className={`panel durable-progress ${failed ? "has-failure" : ""}`} aria-label={isMerge ? "統合の進行状況" : "解析の進行状況"}>
+    <header><div><span className="panel-kicker">{isMerge ? "MERGED REPORT" : "RESEARCH PROGRESS"}</span><h3>{failed ? (isMerge ? "統合が未完了です" : "未完了の調査があります") : notice ? "状況を確認しています" : isMerge ? "保存レポートを突き合わせ、1本にまとめています" : state?.progressStage === "checking" ? "反証を確認し、総合レポートを作成しています" : "専門AIが調査を進めています"}</h3><p>{run.storeName || "店舗分析"} · 経過 {elapsedLabel} · {done}/{jobs.length}段階完了</p></div>{polling && <i className="spinner large"/>}</header>
+    <p className="run-guidance">{isMerge ? "統合は OpenAI gpt-6.2-astra で実行します。画面を閉じても処理は続き、同じアカウントで開くと進行状況を確認できます。完了すると「統合版」タブに保存されます。" : "調査結果は段階ごとに保存されます。画面を閉じても調査は続き、同じアカウントで開くと進行状況を確認できます。X調査は直近と過去を分けて実行し、再試行を含む解析には30分以上かかる場合があります。"}</p>
     <ResearchFocusNote text={state?.researchFocus ?? run.researchFocus}/>
     {notice && <div className="run-connection-notice" role="status">{notice}</div>}
     <ol className="run-job-list">{jobs.map((job, index) => {
@@ -266,6 +280,8 @@ export default function App() {
   const [page, setPage] = useState<Page>("analysis");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
+  const [mergeSelectedIds, setMergeSelectedIds] = useState<string[]>([]);
+  const [confirmMixedStores, setConfirmMixedStores] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
@@ -424,6 +440,7 @@ export default function App() {
         const report = result.report;
         ++reportRevision.current;
         setReports((items) => [report, ...items.filter((item) => item.id !== report.id)]);
+        if (isMergedReport(report)) setReportFilter("merged");
         setSelectedId(report.id); setTab("report"); setResearchExpanded(false);
         clearActiveRun(userId, run.runId); setActiveRun(null); setRunState(null); setRunNotice("");
       } else if (result.kind === "trashed" || result.kind === "deleted") {
@@ -509,11 +526,36 @@ export default function App() {
     setWorking("analysis"); setRunState(null); setRunNotice(""); setError("");
     try {
       const started = await invoke<{ runId: string }>({ action: "analyze", storeName, storeUrl, groupName, selectedSites, ...(focus ? { researchFocus: focus } : {}) });
-      const run = { runId: started.runId, storeName, startedAt: new Date().toISOString(), researchFocus: focus };
+      const run = { runId: started.runId, storeName, startedAt: new Date().toISOString(), researchFocus: focus, kind: "analyze" as const };
       saveActiveRun(userId, run);
       if (currentUserId.current !== userId || authEpoch.current !== epoch) return;
       await completeAnalysisRun(run, userId);
     } catch (e) { if (currentUserId.current === userId && authEpoch.current === epoch) setError(analysisErrorMessage(e)); }
+    finally { if (currentUserId.current === userId && authEpoch.current === epoch) setWorking(null); }
+  }
+  async function startMerge() {
+    const userId = currentUserId.current, epoch = authEpoch.current;
+    if (!userId || working || activeRun || discoveringRun) return;
+    const chosen = reports.filter((report) => mergeSelectedIds.includes(report.id));
+    if (chosen.length < 2) { setError("統合するレポートを2件以上選んでください"); return; }
+    const keys = new Set(chosen.map((report) => storeIdentityKey(report.storeName, report.storeUrl)));
+    if (keys.size > 1 && !confirmMixedStores) { setError("異なる店舗のレポートが混ざっています。内容を確認し、確認用のチェックを入れてから実行してください。"); return; }
+    const store = officialDisplayName(chosen[0].storeName, chosen[0].storeUrl);
+    const url = officialDisplayUrl(store, chosen[0].storeUrl);
+    const siteMap = new Map<string, { id: string; name: string; url: string }>();
+    for (const report of chosen) for (const site of report.selectedSites ?? []) {
+      if (site?.id && !siteMap.has(site.id)) siteMap.set(site.id, { id: site.id, name: site.name || site.id, url: site.url || "" });
+    }
+    const selectedSites = [...siteMap.values()].slice(0, 12);
+    if (!selectedSites.length) selectedSites.push({ id: "official", name: "公式サイト", url });
+    setWorking("analysis"); setRunState(null); setRunNotice(""); setError("");
+    try {
+      const started = await invoke<{ runId: string }>({ action: "merge_reports", storeName: store, storeUrl: url, groupName: chosen[0].groupName, selectedSites, reportIds: chosen.map((report) => report.id), confirmMixedStores: keys.size > 1 });
+      const run = { runId: started.runId, storeName: store, startedAt: new Date().toISOString(), kind: "merge" as const };
+      saveActiveRun(userId, run);
+      if (currentUserId.current !== userId || authEpoch.current !== epoch) return;
+      await completeAnalysisRun(run, userId);
+    } catch (e) { if (currentUserId.current === userId && authEpoch.current === epoch) setError(e instanceof Error ? e.message : "レポートの統合を開始できませんでした"); }
     finally { if (currentUserId.current === userId && authEpoch.current === epoch) setWorking(null); }
   }
   async function retryAnalysisRun() {
@@ -583,12 +625,25 @@ export default function App() {
   }
 
   const visibleReports = useMemo(() => {
-    if (reportFilter === "checker") return reports.filter(isSharedReport);
-    if (reportFilter === "app") return reports.filter((report) => !isSharedReport(report));
+    if (reportFilter === "checker") return reports.filter((report) => reportKind(report) === "checker");
+    if (reportFilter === "app") return reports.filter((report) => reportKind(report) === "app");
+    if (reportFilter === "merged") return reports.filter(isMergedReport);
     return reports;
   }, [reports, reportFilter]);
-  const checkerCount = useMemo(() => reports.filter(isSharedReport).length, [reports]);
-  const appCount = reports.length - checkerCount;
+  const checkerCount = useMemo(() => reports.filter((report) => reportKind(report) === "checker").length, [reports]);
+  const mergedCount = useMemo(() => reports.filter(isMergedReport).length, [reports]);
+  const appCount = reports.length - checkerCount - mergedCount;
+  const mergeGroups = useMemo(() => groupReportsByStore(reports), [reports]);
+  useEffect(() => {
+    setMergeSelectedIds((ids) => {
+      const live = ids.filter((id) => reports.some((report) => report.id === id));
+      if (live.length >= 2) return live;
+      const preferred = selected ? storeIdentityKey(selected.storeName, selected.storeUrl) : "";
+      const autoGroups = groupReportsByStore(reports.filter((report) => !isMergedReport(report)));
+      const group = autoGroups.find((item) => item.key === preferred && item.reports.length >= 2) ?? autoGroups.find((item) => item.reports.length >= 2);
+      return group ? group.reports.map((report) => report.id) : live;
+    });
+  }, [reports, selected]);
   const missing = [!health.openai && "OpenAI", !health.gemini && "Gemini", !health.xai && "xAI"].filter(Boolean);
   if (!session) return <main className="auth-screen"><div className="auth-card"><a className="brand auth-brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a><span className="eyebrow">PRIVATE RESEARCH WORKSPACE</span><h1>ログイン</h1><p>IDとパスワードでログインします。レポートはアカウントごとに分離して保存されます。</p><form onSubmit={signIn}><label>ID<input required type="text" name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="ID"/></label><label className="auth-password">パスワード<input required type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="パスワード"/></label><button className="primary-button" disabled={signingIn}>{signingIn ? "ログイン中…" : "ログイン"}</button></form>{error && <div className="error-banner">{error}</div>}<small className="auth-security">パスワードはSupabase Authで管理され、このアプリには保存されません。</small></div></main>;
   return <div className="app-shell">
@@ -600,17 +655,19 @@ export default function App() {
       <button className={`side-item trash-nav ${page === "trash" ? "active" : ""}`} onClick={() => { setPage("trash"); void refreshTrash(); }}><TrashIcon/>ゴミ箱 <span className="trash-nav-count">{trashCount}</span></button>
       {page === "analysis" && <><div className="side-label history-label">保存したレポート <span>{reports.length}</span></div>
       <div className="history-filters" role="tablist" aria-label="レポートの種類">
-        {([["all", "すべて", reports.length], ["checker", "Grok Bot", checkerCount], ["app", "アプリ", appCount]] as [ReportFilter, string, number][]).map(([id, label, count]) => (
+        {([["all", "すべて", reports.length], ["checker", "Grok Bot", checkerCount], ["app", "アプリ", appCount], ["merged", "統合版", mergedCount]] as [ReportFilter, string, number][]).map(([id, label, count]) => (
           <button key={id} type="button" role="tab" aria-selected={reportFilter === id} className={`history-filter ${reportFilter === id ? "active" : ""}`} onClick={() => setReportFilter(id)}>{label} <span>{count}</span></button>
         ))}
       </div>
       <div className="history-list">
-        {visibleReports.map((report) => <div className={`history-row ${isSharedReport(report) ? "history-row-checker" : "history-row-app"}`} key={report.id}><button onClick={() => { setSelectedId(report.id); setTab("report"); }} className={`history-item ${selected?.id === report.id ? "selected" : ""}`}>
+        {visibleReports.map((report) => <div className={`history-row history-row-${reportKind(report)}`} key={report.id}><button onClick={() => { setSelectedId(report.id); setTab("report"); }} className={`history-item ${selected?.id === report.id ? "selected" : ""}`}>
           <span className="history-item-top"><b>{report.storeName}</b><ReportSourceBadge report={report} /></span><small>{dateLabel(report.createdAt)}</small>
         </button>{!isSharedReport(report) && <button type="button" className="history-trash" title="ゴミ箱へ移動" aria-label={`${report.storeName} ${reportDate(report.createdAt)}をゴミ箱へ移動`} disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", report); }}><TrashIcon/></button>}</div>)}
         {!reports.length && <p className="muted history-empty">分析を実行すると、レポートがここに保存されます。</p>}
         {!!reports.length && !visibleReports.length && <p className="muted history-empty">この条件のレポートはありません。</p>}
-      </div></>}
+      </div>
+      {reports.length >= 2 && <button type="button" className="merge-launch" disabled={!!working || !!activeRun || discoveringRun} onClick={() => document.getElementById("merge-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}>同じ店舗のレポートを統合</button>}
+      </>}
       <div className="sidebar-bottom"><span className={`local-dot ${missing.length ? "needs-keys" : ""}`} />SUPABASE PRIVATE DATA<br /><small>利用者ごとに分離して保存</small></div>
     </aside>
 
@@ -671,6 +728,37 @@ export default function App() {
             <button className="primary-button" disabled={!!working || !!activeRun || discoveringRun || (!selectedSiteIds.length && !customSites.length)}>{working === "analysis" ? <><i className="spinner" />解析を実行しています</> : discoveringRun ? "実行中の解析を確認しています" : activeRun ? "進行中の解析を確認してください" : "選択したサイトを分析　↗"}</button>
             <div className="privacy-note">公開情報を対象に調査します。AI APIキーはSupabase Edge Functionからのみ利用します。</div>
           </form>
+
+          <section id="merge-panel" className="panel form-panel merge-panel">
+            <span className="panel-kicker">MERGE REPORTS</span>
+            <h2>同じ店舗のレポートを統合</h2>
+            <p className="form-intro muted">見えるレポート（自分のアプリ分析と Grok Bot の共有レポート）を突き合わせ、gpt-6.2-astra で1本の「統合版」に作り直します。結果は自分だけが閲覧・質問・削除できます。</p>
+            {mergeGroups.length ? mergeGroups.map((group) => <div className="merge-group" key={group.key}>
+              <div className="merge-group-head">
+                <b>{group.storeName}</b>
+                <span>{group.reports.length}件</span>
+                {group.reports.length >= 2 && <button type="button" className="text-button" onClick={() => setMergeSelectedIds(group.reports.map((report) => report.id))}>この店舗を選ぶ</button>}
+              </div>
+              {group.reports.map((report) => {
+                const checked = mergeSelectedIds.includes(report.id);
+                return <label className="merge-option" key={report.id}>
+                  <input type="checkbox" checked={checked} onChange={() => setMergeSelectedIds((ids) => checked ? ids.filter((id) => id !== report.id) : [...ids, report.id])}/>
+                  <span className="merge-option-body">
+                    <span className="merge-option-title">{report.storeName}<ReportSourceBadge report={report} /></span>
+                    <small>{dateLabel(report.createdAt)}</small>
+                  </span>
+                </label>;
+              })}
+            </div>) : <p className="muted history-empty">統合できるレポートがまだありません。</p>}
+            {(() => {
+              const chosen = reports.filter((report) => mergeSelectedIds.includes(report.id));
+              const mixed = new Set(chosen.map((report) => storeIdentityKey(report.storeName, report.storeUrl))).size > 1;
+              return <>
+                {mixed && <label className="merge-mixed"><input type="checkbox" checked={confirmMixedStores} onChange={(event) => setConfirmMixedStores(event.target.checked)}/>異なる店舗のレポートを含めて統合することを確認しました</label>}
+                <button type="button" className="primary-button" disabled={!!working || !!activeRun || discoveringRun || mergeSelectedIds.length < 2 || (mixed && !confirmMixedStores)} onClick={() => { void startMerge(); }}>{working === "analysis" && activeRun?.kind === "merge" ? "統合しています…" : `選んだ${mergeSelectedIds.length}件を統合する`}</button>
+              </>;
+            })()}
+          </section>
           <div className="panel process-panel"><div className="panel-kicker">調査の進め方</div><div className="process-step"><i>01</i><div><b>分野別に調査</b><small>3つのAIがそれぞれ独立して検索</small></div></div><div className="process-step"><i>02</i><div><b>相互に検証</b><small>矛盾・反証・未確認を整理</small></div></div><div className="process-step"><i>03</i><div><b>統合レポート</b><small>出典付きの優先施策にまとめる</small></div></div></div>
         </section>
 
@@ -679,7 +767,7 @@ export default function App() {
           {error && <div className="error-banner"><b>処理を完了できませんでした</b><span>{error}</span></div>}
           {!activeRun && runNotice && <div className="run-connection-notice" role="status">{runNotice}</div>}
           {activeRun && <RunProgress run={activeRun} state={runState} polling={polling} retrying={retrying} busy={working === "question"} notice={runNotice} onRetry={() => { void retryAnalysisRun(); }} onRegenerate={() => { void regenerateSynthesis(); }} onCheck={() => { const userId = currentUserId.current; if (userId && !working && !retrying && !runMutation.current) void completeAnalysisRun(activeRun, userId); }} onClose={closeFailedAnalysisRun}/>}
-          {working === "analysis" && !activeRun && <div className="panel live-progress"><div className="spinner large"/><div><b>調査の開始を確認しています</b><span>解析が登録されると、各調査の進行状況を表示します。</span></div></div>}
+          {working === "analysis" && !activeRun && <div className="panel live-progress"><div className="spinner large"/><div><b>開始を確認しています</b><span>受付が完了すると、進行状況を表示します。</span></div></div>}
           {selected ? <>
             <section className="report-heading panel"><div><span className="eyebrow">ANALYSIS REPORT · {dateLabel(selected.createdAt)}</span><div className="report-title-row"><h2>{selected.storeName}</h2><ReportSourceBadge report={selected} size="md" /></div><a href={selected.storeUrl} target="_blank" rel="noreferrer">{selected.storeUrl} ↗</a><div className="selected-site-tags">{(selected.selectedSites ?? []).map((site) => <span key={site.id}>{site.name}</span>)}</div></div><div className="report-header-actions"><span className={`complete-badge ${selected.agents.some((agent) => agent.status !== "done") ? "partial-badge" : ""}`}><i/>{selected.agents.some((agent) => agent.status !== "done") ? "一部の調査が未完了" : "レポート作成完了"}</span><div className="report-action-buttons"><button type="button" onClick={() => window.print()}>印刷・PDF保存</button>{!isSharedReport(selected) && <><ReportShareControls key={`${session.user.id}:${selected.id}`} reportId={selected.id} storeName={selected.storeName} disabled={!!busyReportId || working === "question"}/><button type="button" className="report-trash-button" disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", selected); }}><TrashIcon/>ゴミ箱へ移動</button></>}</div></div></section>
             <ResearchFocusNote text={selected.researchFocus}/>

@@ -6,6 +6,7 @@ import { recoverClaimQuotations } from "./claim-quotation-recovery.ts";
 import { type DirectPage, directPageEvidence, directPageReceipts, loadDirectPages, verifyTabelogCourseSources } from "./direct-pages.ts";
 import { googleMapsPlacePath } from "./google-maps-profile.ts";
 import { newReportShareToken } from "../_shared/report-share-token.ts";
+import { officialDisplayName, officialDisplayUrl, storeIdentityKey } from "./store-identity.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
@@ -507,6 +508,7 @@ async function diagnoseGemini(db: any, userId: string): Promise<GeminiDiagnosis>
   }
 }
 function requireResearchProviders(agents: Agent[]) {
+  if (agents.some((agent) => agent.id === "merge" || agent.id.startsWith("merge-source-"))) return;
   const required = [{ id: "market", provider: /^OpenAI(?: · GPT-6\.1 Terra)?$/ }, { id: "gourmet", provider: /^Google Gemini$/ }, { id: "social", provider: /^xAI Grok$/ }];
   if (agents.length !== 3 || required.some(({ id, provider }) => !agents.some(agent => agent.id === id && agent.status === "done" && provider.test(agent.provider)))) {
     throw new Error("OpenAI・Gemini・Grokの3社すべての専門調査が完了していないため統合できません。未完了の調査を再開してください。");
@@ -674,6 +676,9 @@ function validateReportQuality(report: Record<string, any>, input: any, availabl
 function isCheckerReport(row: any) {
   return row?.source === "gourmet_checker";
 }
+function isMergedReport(row: any) {
+  return row?.source === "merged";
+}
 function canReadReport(row: any, userId: string) {
   return !!row && (row.user_id === userId || isCheckerReport(row));
 }
@@ -684,10 +689,11 @@ function dbReport(row: any, followups: any[] = []) {
     critique: row.critique ?? "", critiqueSources: row.critique_sources ?? [], report: row.report ?? "",
     reportSources: row.report_sources ?? [], followups: followups.map((item) => ({ question: item.question, answer: item.answer, sources: item.sources, at: item.created_at })),
     source: row.source ?? "insight_studio", sourceUrl: row.source_url ?? null, shared: isCheckerReport(row),
+    sourceReportIds: Array.isArray(row.source_report_ids) ? row.source_report_ids : [],
   };
 }
 
-const JOB_LABELS: Record<string, string> = { market: "市場・競合調査", gourmet: "グルメ媒体調査", social_recent: "X調査・最近の体験", social_history: "X調査・過去との比較", synthesis: "反証・総合レポート" };
+const JOB_LABELS: Record<string, string> = { market: "市場・競合調査", gourmet: "グルメ媒体調査", social_recent: "X調査・最近の体験", social_history: "X調査・過去との比較", synthesis: "反証・総合レポート", merge_reports: "レポートの統合" };
 const serviceDb = () => createClient(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"), { auth: { persistSession: false, autoRefreshToken: false } });
 const rpc = async (db: any, name: string, args: Record<string, unknown> = {}) => {
   const { data, error } = await db.rpc(name, args);
@@ -727,6 +733,7 @@ ${researchRules}
 ${ctx}` };
 }
 function buildSynthesisPrompt(input: any, agents: Agent[], repairFeedback = ""): string {
+  if (input?.mode === "merge") return buildMergePrompt(input, agents, repairFeedback);
   const { storeName, storeUrl, groupName, selectedSites } = input;
   const parsed = new URL(storeUrl);
   const ctx = contextFor(storeName, storeUrl, groupName, selectedSites, input.researchFocus);
@@ -822,6 +829,7 @@ async function savedSynthesis(meter: MeterContext, saved: any): Promise<Synthesi
   return null;
 }
 async function finalizeSynthesis(input: any, agents: Agent[], integrated: SynthesisDraft) {
+  if (input?.mode === "merge") return finalizeMerge(input, agents, integrated);
   const { storeName, storeUrl, groupName, selectedSites } = input;
   const parsed = parseIntegratedReport(integrated.text);
   const critique = parsed.critique;
@@ -1055,6 +1063,147 @@ async function synthesize(input: any, agents: Agent[], meter: MeterContext, repa
   return useBackground ? { ...result, backgroundSynthesisPending: false } : result;
 }
 
+
+const MERGE_SOURCE_LABEL: Record<string, string> = { gourmet_checker: "Grok Bot", insight_studio: "アプリ分析", merged: "統合版" };
+
+function compactSourceReport(row: any, index: number) {
+  let parsed: any = null;
+  try { parsed = typeof row.report === "string" ? JSON.parse(row.report) : row.report; } catch { parsed = null; }
+  const compact = parsed && typeof parsed === "object" ? {
+    overallAssessment: parsed.overallAssessment,
+    keyMessage: parsed.keyMessage,
+    keyFindings: parsed.keyFindings,
+    strengths: parsed.strengths,
+    actionPlan: parsed.actionPlan,
+    limitations: parsed.limitations,
+    detailSections: Array.isArray(parsed.detailSections) ? parsed.detailSections.map((section: any) => ({
+      id: section?.id, title: section?.title, body: clean(section?.body, 2500), sources: section?.sources,
+    })) : undefined,
+    researchCoverage: parsed.researchCoverage,
+  } : { raw: clean(String(row.report ?? ""), 8000) };
+  const packed = {
+    index: index + 1,
+    reportId: row.id,
+    createdAt: row.created_at,
+    source: row.source ?? "insight_studio",
+    sourceLabel: MERGE_SOURCE_LABEL[row.source] ?? row.source ?? "不明",
+    storeName: row.store_name,
+    storeUrl: row.store_url,
+    selectedSites: row.selected_sites,
+    critique: clean(row.critique ?? "", 6000),
+    report: compact,
+    reportSources: row.report_sources ?? [],
+    critiqueSources: row.critique_sources ?? [],
+  };
+  let text = JSON.stringify(packed, null, 2);
+  if (text.length > 14000) text = `${text.slice(0, 13900)}\n…(長いため省略)`;
+  return { packed, text, sources: sourceUrls("", [...(row.report_sources ?? []), ...(row.critique_sources ?? [])]) };
+}
+
+function buildMergePrompt(input: any, agents: Agent[], repairFeedback = "") {
+  const dossiers = agents.map((agent, index) => `【元レポート${index + 1}】\n${agent.text}`).join("\n\n");
+  return `あなたは飲食店の公開情報アナリストです。同じ店舗について保存された複数の既存レポートを精査し、矛盾・重複・古い情報を整理したうえで、1本の統合レポートに作り直してください。新しい現地調査ではなく、渡されたレポート同士の突き合わせが主仕事です。必要なら web_search で日付の新しい公式情報だけを短く確認してよいですが、確認できないことは未確認と書いてください。
+
+店舗: ${input.storeName}
+公式サイト: ${input.storeUrl}
+統合する元レポート数: ${input.reportIds?.length ?? agents.length}
+
+出力は次のJSONオブジェクトだけです。説明文やコード囲みは不要です。
+{"critique":"元レポート間の一致点・矛盾・採用理由を日本語で記述","report":{"overallAssessment":"","keyMessage":"","keyFindings":[{"id":"F1","title":"","issue":"","evidence":"","action":"","severity":"high","confidence":"confirmed","impact":"","verification":"","counterpoint":"","sources":[]}],"strengths":[""],"actionPlan":[{"priority":"P0","action":"","reason":"","effort":"","timing":"","owner":"","deliverable":"","metric":"","baseline":"","target":"","verification":"","steps":[""],"findingIds":["F1"]}],"limitations":[""],"detailedReport":"","detailSections":[{"id":"reconciliation","title":"元レポートの突き合わせ","body":"矛盾・古い情報の扱い・採用した根拠を書く","sources":[]},{"id":"scope","title":"調査範囲","body":"","sources":[]}],"conflicts":[{"topic":"","accounts":[{"reportId":"","claim":""}],"resolution":""}],"provenance":[{"reportId":"","sourceLabel":"","createdAt":"","usedFor":""}]}}
+
+制約:
+- report.keyFindings は1件以上。severity は high/medium/low。sources は追跡可能なURLだけ。
+- report.actionPlan は1件以上。priority は P0/P1/P2。
+- report.detailSections は1件以上。id=reconciliation の章を必ず含める。
+- 出典には元レポートのURLを使い、どの元レポートに基づくかを本文か provenance に残す。
+- 矛盾する場合は新しい日付や公式一次情報を優先し、採用しなかった説も reconciliation か conflicts に残す。
+- 元レポートにない断定を増やさない。
+${repairFeedback ? `\n前回の形式指摘を解消すること:\n${repairFeedback}\n` : ""}
+
+${dossiers}`;
+}
+
+function finalizeMerge(input: any, agents: Agent[], integrated: SynthesisDraft) {
+  const parsed = parseIntegratedReport(integrated.text);
+  const report = {
+    ...parsed.report,
+    qualityGate: { version: 1, kind: "merge", model: SYNTHESIS_MODEL, checkedAt: new Date().toISOString() },
+    merge: {
+      model: SYNTHESIS_MODEL,
+      sourceReportIds: input.reportIds,
+      mergedAt: new Date().toISOString(),
+    },
+  };
+  const cited = sourceUrls(parsed.critique, reportSourceUrls(report));
+  const known = new Set(sourceUrls("", [...agents.flatMap((agent) => agent.sources), ...integrated.toolSources, ...cited]).map(canonicalSource));
+  const sources = sourceUrls("", [...cited, ...agents.flatMap((agent) => agent.sources), ...integrated.toolSources])
+    .filter((url) => known.has(canonicalSource(url)));
+  return {
+    synthesisDraft: integrated, synthesisComplete: true,
+    report_row: {
+      store_name: input.storeName, store_url: input.storeUrl, group_name: input.groupName ?? null,
+      selected_sites: input.selectedSites,
+      agents: [{ id: "merge", provider: "OpenAI", status: "done", text: `${SYNTHESIS_MODEL} が${input.reportIds.length}件の保存レポートを突き合わせて1本にまとめました。`, sources }],
+      critique: parsed.critique, critique_sources: sourceUrls(parsed.critique).filter((url) => known.has(canonicalSource(url))),
+      report: JSON.stringify(report), report_sources: sources,
+      source: "merged", source_report_ids: input.reportIds,
+    },
+  };
+}
+
+function parseReportIds(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const ids = [...new Set(value.map((id) => clean(id, 64)).filter((id) => /^[0-9a-f-]{36}$/i.test(id)))];
+  return ids;
+}
+
+async function queueMerge(db: any, userId: string, input: any) {
+  if (!env("OPENAI_API_KEY")) throw new Error("OpenAI APIキーを設定してください");
+  const reportIds = parseReportIds(input.reportIds);
+  if (reportIds.length < 2 || reportIds.length > 8) throw new Error("統合するレポートを2件以上、8件以内で選んでください");
+  const { data: rows, error } = await db.from("restaurant_insight_reports").select("*").in("id", reportIds);
+  if (error) throw error;
+  const byId = new Map((rows ?? []).map((row: any) => [row.id, row]));
+  const reports = reportIds.map((id) => byId.get(id)).filter((row): row is any => !!row);
+  if (reports.length !== reportIds.length) throw new Error("選べるレポートが見つかりません");
+  if (reports.some((row: any) => row.deleted_at)) throw new Error("ゴミ箱のレポートは復元してから統合してください");
+  if (reports.some((row: any) => !canReadReport(row, userId))) throw new Error("見る権限のないレポートは統合できません");
+  const keys = new Set(reports.map((row: any) => storeIdentityKey(row.store_name, row.store_url)));
+  if (keys.size > 1 && input.confirmMixedStores !== true) {
+    throw new Error("異なる店舗のレポートが混ざっています。内容を確認したうえで、別店舗の統合を明示してください。");
+  }
+  const first = reports[0];
+  const storeName = officialDisplayName(clean(input.storeName, 120) || first.store_name, clean(input.storeUrl, 600) || first.store_url);
+  const storeUrl = officialDisplayUrl(storeName, clean(input.storeUrl, 600) || first.store_url);
+  if (!storeName || !storeUrl) throw new Error("店舗名と公式サイトURLを確認してください");
+  const selectedSites = normalizeSites(input.selectedSites?.length ? input.selectedSites : reports.flatMap((row: any) => row.selected_sites ?? []));
+  const sites = selectedSites.length ? selectedSites : [{ id: "official", name: "公式サイト", url: storeUrl }];
+  return await rpc(db, "restaurant_insight_queue_merge_run", {
+    p_user_id: userId,
+    p_input: { mode: "merge", storeName, storeUrl, groupName: clean(input.groupName, 120) || first.group_name || null, selectedSites: sites, reportIds, confirmMixedStores: input.confirmMixedStores === true },
+  });
+}
+
+async function runMergeJob(db: any, run: any, job: any, meter: MeterContext) {
+  const reportIds = parseReportIds(run.input?.reportIds);
+  const { data: rows, error } = await db.from("restaurant_insight_reports").select("*").in("id", reportIds);
+  if (error) throw error;
+  const byId = new Map((rows ?? []).map((row: any) => [row.id, row]));
+  const reports = reportIds.map((id) => byId.get(id)).filter(Boolean);
+  if (reports.length !== reportIds.length || reports.some((row: any) => !canReadReport(row, run.user_id) || row.deleted_at)) {
+    throw new Error("統合元のレポートを読み取れませんでした");
+  }
+  const compacted = reports.map((row: any, index: number) => compactSourceReport(row, index));
+  const agents: Agent[] = compacted.map((item, index) => ({
+    id: `merge-source-${index + 1}`,
+    provider: String(item.packed.sourceLabel),
+    status: "done" as const,
+    text: item.text,
+    sources: item.sources,
+  }));
+  return await synthesize({ ...run.input, mode: "merge", reportIds }, agents, meter, job.output?.regenerationFeedback ?? job.error_message ?? "", job.output);
+}
+
 async function queueAnalysis(db: any, userId: string, input: any) {
   const storeName = clean(input.storeName, 120), storeUrl = clean(input.storeUrl, 600), groupName = clean(input.groupName, 120) || null;
   let parsed: URL; try { parsed = new URL(storeUrl); } catch { throw new Error("店舗の公式サイトURLを入力してください"); }
@@ -1144,6 +1293,13 @@ async function executeJob(db: any, job: any, run: any) {
       const social: Agent = { id: "social", provider: "xAI Grok", status: "done", researchUpdates: updates,
         text: `調査の更新履歴\n${updates.map((value, index) => updateSummary(value, index === 0 ? "最近の体験" : "過去の体験")).join("\n")}\n保存済み記録と今回の差分を合わせて検討する。古い体験を今回取得した声や現在の運用と断定しない。前回の反例を落とさず、更新情報と矛盾すれば時点・制約を示す。\n## 最近の体験\n${recent.text}\n\n## 過去の体験・発信との比較\n${history.text}`, sources: [...new Set([...recent.sources, ...history.sources])] };
       output = await synthesize(run.input, [get("market"), get("gourmet"), social], meter("fact_check_synthesis"), job.output?.regenerationFeedback ?? job.error_message ?? "", job.output);
+      if (output === null) {
+        const deferred = await rpc(db, "restaurant_insight_defer_synthesis", { p_job_id: job.id, p_lease_token: job.lease_token });
+        if (deferred === false) throw new Error("次回の統合応答確認を予約できませんでした。");
+        return;
+      }
+    } else if (job.job_key === "merge_reports") {
+      output = await runMergeJob(db, run, job, meter("report_merge"));
       if (output === null) {
         const deferred = await rpc(db, "restaurant_insight_defer_synthesis", { p_job_id: job.id, p_lease_token: job.lease_token });
         if (deferred === false) throw new Error("次回の統合応答確認を予約できませんでした。");
@@ -1282,7 +1438,7 @@ export async function handleApi(req: Request) {
     if (input.action === "active_run") {
       const { data: run, error } = await db.from("restaurant_insight_runs").select("id,started_at,input").eq("user_id", userId).eq("status", "running").order("started_at", { ascending: false }).limit(1).maybeSingle();
       if (error) throw error;
-      return json({ run: run ? { runId: run.id, startedAt: run.started_at, storeName: run.input?.storeName ?? "店舗分析", researchFocus: normalizeResearchFocus(run.input?.researchFocus) } : null });
+      return json({ run: run ? { runId: run.id, startedAt: run.started_at, storeName: run.input?.storeName ?? "店舗分析", researchFocus: normalizeResearchFocus(run.input?.researchFocus), kind: run.input?.mode === "merge" ? "merge" : "analyze" } : null });
     }
     if (input.action === "list") {
       const [{ data: ownRows, error: ownError }, { data: sharedRows, error: sharedError }] = await Promise.all([
@@ -1315,7 +1471,7 @@ export async function handleApi(req: Request) {
       return json({ costs: costs ?? [] });
     }
     if (input.action === "run_status") return json(await getRunStatus(db, userId, clean(input.runId, 64)));
-    if (input.action === "analyze" || input.action === "question" || input.action === "retry_run" || input.action === "diagnose_gemini" || input.action === "regenerate_synthesis") {
+    if (input.action === "analyze" || input.action === "question" || input.action === "retry_run" || input.action === "diagnose_gemini" || input.action === "regenerate_synthesis" || input.action === "merge_reports") {
       const serviceKey = env("SUPABASE_SERVICE_ROLE_KEY");
       if (!serviceKey) throw new Error("利用量記録用のサーバー設定を確認してください");
       const costDb = createClient(env("SUPABASE_URL"), serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -1333,6 +1489,11 @@ export async function handleApi(req: Request) {
         await rpc(costDb, "restaurant_insight_dispatch_jobs");
         return json({ runId, status: "running" }, 202);
       }
+      if (input.action === "merge_reports") {
+        const runId = await queueMerge(costDb, userId, input);
+        await rpc(costDb, "restaurant_insight_dispatch_jobs");
+        return json({ runId, status: "running" }, 202);
+      }
       if (input.action === "retry_run") {
         const runId = clean(input.runId, 64);
         await rpc(costDb, "restaurant_insight_retry_run", { p_run_id: runId, p_user_id: userId });
@@ -1347,7 +1508,7 @@ export async function handleApi(req: Request) {
   }
 }
 
-export { diagnoseGemini, geminiResearch, requireResearchProviders, providerDiagnostics, quotaDiagnostics, safeProviderMessage, parseMenuInventory, parseIntegratedReport, validateReportQuality, sourceUrls, reportSourceUrls, consumeResponseStream, requestJson, readUsage, normalizeResearchFocus, buildResearchPrompts, buildSynthesisPrompt, reportWithResearchFocus, dbReport, queueAnalysis, synthesize, answerQuestion, manageReport, reportState, listTrash, parseTrashCursor };
+export { diagnoseGemini, geminiResearch, requireResearchProviders, providerDiagnostics, quotaDiagnostics, safeProviderMessage, parseMenuInventory, parseIntegratedReport, validateReportQuality, sourceUrls, reportSourceUrls, consumeResponseStream, requestJson, readUsage, normalizeResearchFocus, buildResearchPrompts, buildSynthesisPrompt, reportWithResearchFocus, dbReport, queueAnalysis, queueMerge, synthesize, answerQuestion, manageReport, reportState, listTrash, parseTrashCursor };
 
 export { reconcileCosts, retrieveXaiResponse };
 export { loadSocialBaseline, socialResearch };
