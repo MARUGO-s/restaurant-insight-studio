@@ -235,6 +235,17 @@ assert(sharedHtml.includes(`<p>M2（${breadCourse}）・M４（${pairingCourse}�
 assert(sharedHtml.includes('href="https://example.com/courses/M4"')&&sharedHtml.includes('href="#report-details"'));
 for(const label of ['ログイン','API料金','ゴミ箱','専門AIの原調査','訂正前の名称']) assert(!sharedHtml.includes(label),label);
 assert(render(SharedReportPage,{baseUrl:'https://example.com',token:null}).includes('この共有リンクではレポートを閲覧できません。'));
+const mergeFixture={...fixture,qualityGate:{version:2},merge:{model:'gpt-6.2-astra',sourceReportIds:['aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'],mergedAt:'2026-11-21T09:51:02.178Z'},conflicts:[{topic:'金曜の昼営業',accounts:[{sourceLabel:'Grok Bot',claim:'金・土の昼が伝わらない'},{sourceLabel:'アプリ分析',claim:'公式は金曜昼の案内がある'}],resolution:'公式の新しい案内を採用する'}],provenance:[{sourceLabel:'アプリ分析',createdAt:'2026-11-20T05:33:03.174Z',usedFor:'掲載監査とコース表'}]};
+const mergeHtml=render(IntegratedReport,{text:JSON.stringify(mergeFixture)});
+assert(mergeHtml.includes('アプリの標準構成で1本にまとめた統合版です。'));
+assert(mergeHtml.includes('id="report-reconciliation"'));
+assert.equal((mergeHtml.match(/<h3>元レポートの突き合わせ<\/h3>/g)||[]).length,1);
+assert(mergeHtml.includes('金曜の昼営業')&&mergeHtml.includes('公式の新しい案内を採用する'));
+assert(mergeHtml.includes('用いた元レポート')&&mergeHtml.includes('アプリ分析'));
+assert(!mergeHtml.includes('次の解析から適用されます'));
+const withReconHtml=render(IntegratedReport,{text:JSON.stringify({...mergeFixture,detailSections:[...fixture.detailSections,{title:'元レポートの突き合わせ',body:'本文で整理済み'}]})});
+assert.equal((withReconHtml.match(/<h3>元レポートの突き合わせ<\/h3>/g)||[]).length,1);
+assert(!withReconHtml.includes('id="report-reconciliation"'));
 const shareEntry=fs.readFileSync(root+'/report.html','utf8');
 assert(shareEntry.includes('content="no-referrer"')&&shareEntry.includes('content="noindex, nofollow, noarchive"'));
 const htmlFlag=process.argv.indexOf('--html-dir');

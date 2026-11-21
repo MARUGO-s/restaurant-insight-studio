@@ -1066,20 +1066,55 @@ async function synthesize(input: any, agents: Agent[], meter: MeterContext, repa
 
 const MERGE_SOURCE_LABEL: Record<string, string> = { gourmet_checker: "Grok Bot", insight_studio: "アプリ分析", merged: "統合版" };
 
+function parseStoredReport(row: any) {
+  try {
+    const parsed = typeof row.report === "string" ? JSON.parse(row.report) : row.report;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.report && typeof parsed.report === "object") return parsed.report;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch { return null; }
+}
+function collectMergeAssets(rows: any[]) {
+  const inventories: any[] = [], originals: any[] = [], coverage: any[] = [];
+  for (const row of rows) {
+    const parsed = parseStoredReport(row);
+    if (!parsed) continue;
+    if (Array.isArray(parsed.productInventory)) inventories.push(...parsed.productInventory);
+    if (Array.isArray(parsed.originalProductInventory)) originals.push(...parsed.originalProductInventory);
+    if (Array.isArray(parsed.researchCoverage)) coverage.push(...parsed.researchCoverage);
+  }
+  const unique = (items: any[], keyOf: (item: any) => string) => {
+    const seen = new Set<string>();
+    return items.filter((item) => {
+      const key = keyOf(item).normalize("NFKC").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  return {
+    productInventory: unique(inventories, (item) => String(item?.id || `${item?.name ?? ""}|${item?.source ?? ""}|${item?.price ?? ""}`)),
+    originalProductInventory: unique(originals, (item) => String(item?.id || `${item?.name ?? ""}|${item?.source ?? ""}|${item?.price ?? ""}`)),
+    researchCoverage: unique(coverage, (item) => String(item?.targetId || item?.site || "")),
+  };
+}
 function compactSourceReport(row: any, index: number) {
-  let parsed: any = null;
-  try { parsed = typeof row.report === "string" ? JSON.parse(row.report) : row.report; } catch { parsed = null; }
-  const compact = parsed && typeof parsed === "object" ? {
+  const parsed = parseStoredReport(row);
+  const compact = parsed ? {
     overallAssessment: parsed.overallAssessment,
     keyMessage: parsed.keyMessage,
     keyFindings: parsed.keyFindings,
     strengths: parsed.strengths,
     actionPlan: parsed.actionPlan,
     limitations: parsed.limitations,
-    detailSections: Array.isArray(parsed.detailSections) ? parsed.detailSections.map((section: any) => ({
-      id: section?.id, title: section?.title, body: clean(section?.body, 2500), sources: section?.sources,
-    })) : undefined,
     researchCoverage: parsed.researchCoverage,
+    productInventory: Array.isArray(parsed.productInventory) ? parsed.productInventory.slice(0, 20).map((item: any) => ({
+      id: item?.id, name: item?.name, price: item?.price, conditions: item?.conditions, site: item?.site, source: item?.source, reviewStatus: item?.reviewStatus,
+    })) : undefined,
+    detailSections: Array.isArray(parsed.detailSections) ? parsed.detailSections.map((section: any) => ({
+      id: section?.id, title: section?.title, body: clean(section?.body, 1800), sources: section?.sources,
+      columns: section?.columns,
+      rows: Array.isArray(section?.rows) ? section.rows.slice(0, 8) : undefined,
+    })) : undefined,
   } : { raw: clean(String(row.report ?? ""), 8000) };
   const packed = {
     index: index + 1,
@@ -1090,50 +1125,93 @@ function compactSourceReport(row: any, index: number) {
     storeName: row.store_name,
     storeUrl: row.store_url,
     selectedSites: row.selected_sites,
-    critique: clean(row.critique ?? "", 6000),
+    critique: clean(row.critique ?? "", 4000),
     report: compact,
     reportSources: row.report_sources ?? [],
     critiqueSources: row.critique_sources ?? [],
   };
   let text = JSON.stringify(packed, null, 2);
-  if (text.length > 14000) text = `${text.slice(0, 13900)}\n…(長いため省略)`;
+  if (text.length > 16000) text = `${text.slice(0, 15900)}\n…(長いため省略)`;
   return { packed, text, sources: sourceUrls("", [...(row.report_sources ?? []), ...(row.critique_sources ?? [])]) };
 }
 
 function buildMergePrompt(input: any, agents: Agent[], repairFeedback = "") {
   const dossiers = agents.map((agent, index) => `【元レポート${index + 1}】\n${agent.text}`).join("\n\n");
-  return `あなたは飲食店の公開情報アナリストです。同じ店舗について保存された複数の既存レポートを精査し、矛盾・重複・古い情報を整理したうえで、1本の統合レポートに作り直してください。新しい現地調査ではなく、渡されたレポート同士の突き合わせが主仕事です。必要なら web_search で日付の新しい公式情報だけを短く確認してよいですが、確認できないことは未確認と書いてください。
+  return `あなたは飲食店の公開情報アナリストです。同じ店舗について保存された複数の既存レポートを精査し、矛盾・重複・古い情報を整理したうえで、アプリの標準レポートと同じ構成の統合レポートに1本化してください。新しい現地調査ではなく、渡されたレポート同士の突き合わせが主仕事です。必要なら web_search で日付の新しい公式情報だけを短く確認してよいですが、確認できないことは未確認と書いてください。元レポートにない断定を増やさない。
 
 店舗: ${input.storeName}
 公式サイト: ${input.storeUrl}
 統合する元レポート数: ${input.reportIds?.length ?? agents.length}
 
 出力は次のJSONオブジェクトだけです。説明文やコード囲みは不要です。
-{"critique":"元レポート間の一致点・矛盾・採用理由を日本語で記述","report":{"overallAssessment":"","keyMessage":"","keyFindings":[{"id":"F1","title":"","issue":"","evidence":"","action":"","severity":"high","confidence":"confirmed","impact":"","verification":"","counterpoint":"","sources":[]}],"strengths":[""],"actionPlan":[{"priority":"P0","action":"","reason":"","effort":"","timing":"","owner":"","deliverable":"","metric":"","baseline":"","target":"","verification":"","steps":[""],"findingIds":["F1"]}],"limitations":[""],"detailedReport":"","detailSections":[{"id":"reconciliation","title":"元レポートの突き合わせ","body":"矛盾・古い情報の扱い・採用した根拠を書く","sources":[]},{"id":"scope","title":"調査範囲","body":"","sources":[]}],"conflicts":[{"topic":"","accounts":[{"reportId":"","claim":""}],"resolution":""}],"provenance":[{"reportId":"","sourceLabel":"","createdAt":"","usedFor":""}]}}
+{"critique":"元レポート間の一致点・矛盾・採用理由を日本語で記述","report":{"overallAssessment":"総合判断を一文で","keyMessage":"最初に取り組むこととその理由を2〜3文で","researchCoverage":[{"targetId":"official","site":"公式サイト","status":"partial","scope":"元レポートで確認できた範囲","limitation":"この統合では新たに取得していないこと","sources":[]}],"keyFindings":[{"id":"F1","scope":"store","title":"","issue":"","evidence":"","action":"","severity":"high","confidence":"confirmed","impact":"","verification":"","counterpoint":"","sources":[]}],"strengths":[""],"actionPlan":[{"scope":"store","priority":"P0","action":"","reason":"","effort":"","timing":"","owner":"","deliverable":"","metric":"","baseline":"","target":"","verification":"","steps":[""],"findingIds":["F1"]}],"limitations":[""],"detailedReport":"詳細本文の導入。重複する全文はここに書かず、各章に記述する","detailSections":[{"id":"scope","title":"1．調査範囲と情報の限界","body":"数段落の本文","columns":["対象","確認できたこと","未確認・制約"],"rows":[["項目","確認内容","未確認"]],"sources":[]}],"conflicts":[{"topic":"","accounts":[{"reportId":"","sourceLabel":"","claim":""}],"resolution":""}],"provenance":[{"reportId":"","sourceLabel":"","createdAt":"","usedFor":""}]}}
 
 制約:
-- report.keyFindings は1件以上。severity は high/medium/low。sources は追跡可能なURLだけ。
-- report.actionPlan は1件以上。priority は P0/P1/P2。
-- report.detailSections は1件以上。id=reconciliation の章を必ず含める。
-- 出典には元レポートのURLを使い、どの元レポートに基づくかを本文か provenance に残す。
-- 矛盾する場合は新しい日付や公式一次情報を優先し、採用しなかった説も reconciliation か conflicts に残す。
-- 元レポートにない断定を増やさない。
+- report.keyFindings は1件以上。scope は store / verification / research のいずれか。severity は high/medium/low。confidence は confirmed/inferred/unverified。sources は追跡可能なURLだけ。
+- report.actionPlan は1件以上。scope を付け、priority は P0/P1/P2。findingIds で課題と結ぶ。
+- detailSections には、アプリの標準レポートと同じ次の10章をこの順で必ず含める。情報がない章も省略せず、元レポートで確認できた範囲と未確認の理由を書く。各章は数段落の body に加え、columns/rows の比較表を付ける（通常3〜6列。未確認のセルは「未確認」）。
+(1) id=scope: 調査範囲と情報の限界
+(2) id=positioning: 店舗の現状・強み・利用場面と訴求方針
+(3) id=listings: 媒体ごとの掲載監査と媒体間の差異。${LISTING_COMPARISON_FIELDS}
+(4) id=menu: コース・メニュー・料金・利用条件の整理と選び方
+(5) id=conversion: PR文・写真・予約導線の具体的な改善案
+(6) id=voices: 口コミ・Xの体験分析（読めた母数・期間・反例）と現場改善
+(7) id=competition: 競合・グループ比較と参考にする施策
+(8) id=uncertainties: 反証・矛盾・未確認事項と確認方法
+(9) id=execution: 優先施策の実行手順・担当・確認事項
+(10) id=measurement: 30日間の計画と観測する指標
+- その後に id=reconciliation・見出し「元レポートの突き合わせ」の章を最後に置く。矛盾・古い情報の扱い・採用した根拠を本文と比較表でまとめ、標準10章をこの章で置き換えない。
+- researchCoverage は、元レポートが触れた公式・媒体・Xなどの対象を targetId ごとに1行でまとめる。status は verified/partial/unavailable。この統合で新たに読んでいない対象は、元レポートの記載範囲を引き継ぎ、未確認を verified にしない。
+- productInventory は出力しない。サーバーが元レポートから引き継ぐ。
+- 出典には元レポートのURL、または今回確認した公式URLを使い、どの元レポートに基づくかを本文か provenance に残す。
+- 矛盾する場合は新しい日付や公式一次情報を優先し、採用しなかった説も reconciliation と conflicts に残す。
 ${repairFeedback ? `\n前回の形式指摘を解消すること:\n${repairFeedback}\n` : ""}
-
 ${dossiers}`;
+}
+
+function buildReconciliationSection(report: any) {
+  const conflicts = Array.isArray(report.conflicts) ? report.conflicts : [];
+  const provenance = Array.isArray(report.provenance) ? report.provenance : [];
+  const accountText = (item: any) => Array.isArray(item?.accounts)
+    ? item.accounts.map((account: any) => `${account.sourceLabel || account.reportId || "元レポート"}: ${account.claim || ""}`).join("\n")
+    : "";
+  const body = [
+    "複数の保存レポートを突き合わせ、新しい日付や公式の一次情報を優先して1本にまとめました。",
+    conflicts.length ? `【論点と採否】\n${conflicts.map((item: any) => `・${item?.topic || "論点"}: ${accountText(item).replaceAll("\n", " / ")}${item?.resolution ? ` → ${item.resolution}` : ""}`).join("\n")}` : "",
+    provenance.length ? `【用いた元レポート】\n${provenance.map((item: any) => `・${item?.sourceLabel || item?.reportId || "元レポート"}（${item?.createdAt || "日付不明"}）: ${item?.usedFor || ""}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+  return {
+    id: "reconciliation",
+    title: "元レポートの突き合わせ",
+    body: body || "元レポートの記述を突き合わせ、採用した根拠をこの章に残しています。",
+    ...(conflicts.length ? { columns: ["論点", "各レポートの記述", "採用した判断"], rows: conflicts.map((item: any) => [String(item?.topic || ""), accountText(item), String(item?.resolution || "")]) } : {}),
+  };
+}
+function normalizeMergedSections(report: any) {
+  const sections = Array.isArray(report.detailSections) ? report.detailSections : [];
+  const byId = new Map(sections.filter((section: any) => section?.id).map((section: any) => [section.id, section]));
+  const missing = REQUIRED_REPORT_SECTIONS.filter((id) => !byId.has(id));
+  if (missing.length) {
+    throw new Error(`detailSections にアプリ標準の章idが不足しています: ${missing.join(", ")}。scope, positioning, listings, menu, conversion, voices, competition, uncertainties, execution, measurement の10章をこの順で含め、最後に id=reconciliation を付けて再出力してください。`);
+  }
+  const extras = sections.filter((section: any) => section?.id && !REQUIRED_REPORT_SECTIONS.includes(section.id) && section.id !== "reconciliation");
+  return [...REQUIRED_REPORT_SECTIONS.map((id) => byId.get(id)), ...extras, byId.get("reconciliation") || buildReconciliationSection(report)];
 }
 
 function finalizeMerge(input: any, agents: Agent[], integrated: SynthesisDraft) {
   const parsed = parseIntegratedReport(integrated.text);
-  const report = {
+  const assets = input.mergeSourceAssets ?? { productInventory: [], originalProductInventory: [], researchCoverage: [] };
+  const report: Record<string, any> = {
     ...parsed.report,
-    qualityGate: { version: 1, kind: "merge", model: SYNTHESIS_MODEL, checkedAt: new Date().toISOString() },
-    merge: {
-      model: SYNTHESIS_MODEL,
-      sourceReportIds: input.reportIds,
-      mergedAt: new Date().toISOString(),
-    },
+    detailSections: normalizeMergedSections(parsed.report),
+    qualityGate: { version: 2, kind: "merge", model: SYNTHESIS_MODEL, checkedAt: new Date().toISOString() },
+    merge: { model: SYNTHESIS_MODEL, sourceReportIds: input.reportIds, mergedAt: new Date().toISOString() },
   };
+  if (!Array.isArray(report.researchCoverage) || !report.researchCoverage.length) report.researchCoverage = assets.researchCoverage;
+  if (!Array.isArray(report.productInventory) || !report.productInventory.length) {
+    if (assets.productInventory?.length) report.productInventory = assets.productInventory;
+    if (assets.originalProductInventory?.length) report.originalProductInventory = assets.originalProductInventory;
+  }
   const cited = sourceUrls(parsed.critique, reportSourceUrls(report));
   const known = new Set(sourceUrls("", [...agents.flatMap((agent) => agent.sources), ...integrated.toolSources, ...cited]).map(canonicalSource));
   const sources = sourceUrls("", [...cited, ...agents.flatMap((agent) => agent.sources), ...integrated.toolSources])
@@ -1201,7 +1279,7 @@ async function runMergeJob(db: any, run: any, job: any, meter: MeterContext) {
     text: item.text,
     sources: item.sources,
   }));
-  return await synthesize({ ...run.input, mode: "merge", reportIds }, agents, meter, job.output?.regenerationFeedback ?? job.error_message ?? "", job.output);
+  return await synthesize({ ...run.input, mode: "merge", reportIds, mergeSourceAssets: collectMergeAssets(reports) }, agents, meter, job.output?.regenerationFeedback ?? job.error_message ?? "", job.output);
 }
 
 async function queueAnalysis(db: any, userId: string, input: any) {

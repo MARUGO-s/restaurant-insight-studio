@@ -6,7 +6,10 @@ type Action = { scope?: string; priority?: string; action: string; reason?: stri
 type Product = { id?: string; name: string; price: string; conditions: string; source: string; site: string; reviewStatus?: string; reviewReason?: string };
 type Coverage = { targetId?: string; site: string; status?: string; scope?: string; limitation?: string; sources?: string[] };
 type ClaimReview = { agentId: string; claim: string; decision: string; reason: string; sources: string[] };
-type ReportDocument = { overallAssessment?: string; keyMessage?: string; keyFindings: Finding[]; strengths?: string[]; actionPlan?: Action[]; limitations?: string[]; detailedReport?: string; detailSections?: DetailSection[]; researchCoverage?: Coverage[]; productInventory?: Product[]; originalProductInventory?: Product[]; claimReviews?: ClaimReview[]; qualityVersion?: number };
+type Conflict = { topic: string; accounts: { reportId?: string; sourceLabel?: string; claim: string }[]; resolution?: string };
+type Provenance = { reportId?: string; sourceLabel?: string; createdAt?: string; usedFor?: string };
+type MergeInfo = { model?: string; sourceReportIds?: string[]; mergedAt?: string };
+type ReportDocument = { overallAssessment?: string; keyMessage?: string; keyFindings: Finding[]; strengths?: string[]; actionPlan?: Action[]; limitations?: string[]; detailedReport?: string; detailSections?: DetailSection[]; researchCoverage?: Coverage[]; productInventory?: Product[]; originalProductInventory?: Product[]; claimReviews?: ClaimReview[]; qualityVersion?: number; conflicts?: Conflict[]; provenance?: Provenance[]; merge?: MergeInfo };
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const stringValue = (value: unknown) => typeof value === "string" ? value : "";
 const strings = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -165,6 +168,9 @@ function parseReport(text: string): ReportDocument | null {
       claimReviews: Array.isArray(value.claimReviews) ? records(value.claimReviews).map((item) => ({ agentId: stringValue(item.agentId), claim: stringValue(item.claim), decision: stringValue(item.decision), reason: stringValue(item.reason), sources: strings(item.sources) })) : undefined,
       researchCoverage: records(value.researchCoverage).map((item) => ({ targetId: stringValue(item.targetId), site: stringValue(item.site), status: stringValue(item.status), scope: stringValue(item.scope), limitation: stringValue(item.limitation), sources: strings(item.sources) })),
       detailSections: records(value.detailSections).map((section) => ({ title: stringValue(section.title), body: stringValue(section.body), columns: strings(section.columns), rows: Array.isArray(section.rows) ? section.rows.filter(Array.isArray).map((row) => row.map((cell: unknown) => typeof cell === "string" || typeof cell === "number" ? String(cell) : "")) : [], sources: strings(section.sources) })),
+      conflicts: records(value.conflicts).map((item) => ({ topic: stringValue(item.topic), resolution: stringValue(item.resolution), accounts: records(item.accounts).map((account) => ({ reportId: stringValue(account.reportId), sourceLabel: stringValue(account.sourceLabel), claim: stringValue(account.claim) })) })),
+      provenance: records(value.provenance).map((item) => ({ reportId: stringValue(item.reportId), sourceLabel: stringValue(item.sourceLabel), createdAt: stringValue(item.createdAt), usedFor: stringValue(item.usedFor) })),
+      merge: isRecord(value.merge) ? { model: stringValue(value.merge.model), sourceReportIds: strings(value.merge.sourceReportIds), mergedAt: stringValue(value.merge.mergedAt) } : undefined,
     };
   } catch { return null; }
 }
@@ -218,6 +224,20 @@ function ReviewedInventory({ products, originals }: { products: Product[]; origi
   const columns = ["商品・コース", "記載価格", "提供条件・照合結果", "照合後の媒体", "出典"];
   return <div className="product-inventory"><h4>照合後の商品情報</h4><p className="report-reading-note">統合時の照合結果です。現行価格・提供可否を保証するものではありません。未確認・採用しなかった情報と原記録は、採用した情報と分けて表示します。</p>{adopted.length ? <DataTable columns={columns} rows={rows(adopted)} caption="照合後の商品情報"/> : <p className="muted">照合して採用できた商品情報はありません。</p>}{!!unresolved.length && <section><h4>未確認・採用しなかった商品情報</h4><DataTable columns={columns} rows={rows(unresolved)} caption="未確認・採用しなかった商品情報"/></section>}{originals !== undefined && <details className="sources-block"><summary>専門調査の商品原記録（未検証・訂正前）</summary><p className="report-reading-note">訂正前の媒体名や採用しなかった情報を含む原記録です。照合後の商品情報ではありません。</p>{originals.length ? <ProductInventory products={originals}/> : <p className="muted">商品原記録はありません。</p>}</details>}</div>;
 }
+function accountLine(account: { sourceLabel?: string; reportId?: string; claim: string }) {
+  return [account.sourceLabel || account.reportId, account.claim].filter(Boolean).join(": ");
+}
+function formatReportDate(value?: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium", timeZone: "Asia/Tokyo" }).format(date);
+}
+function ReconciliationDetails({ conflicts, provenance }: { conflicts?: Conflict[]; provenance?: Provenance[] }) {
+  return <>
+    {!!conflicts?.length && <DataTable columns={["論点", "各レポートの記述", "採用した判断"]} rows={conflicts.map((item) => [item.topic, item.accounts.map(accountLine).join("\n"), item.resolution || ""])} caption="元レポートの論点と採否"/>}
+    {!!provenance?.length && <DataTable columns={["元レポート", "作成日", "この統合での使い方"]} rows={provenance.map((item) => [item.sourceLabel || item.reportId || "元レポート", formatReportDate(item.createdAt), item.usedFor || ""])} caption="用いた元レポート"/>}
+  </>;
+}
 export function IntegratedReport({ text }: { text: string }) {
   const report = parseReport(text);
   if (!report) return <LegacyReport text={text}/>;
@@ -235,6 +255,7 @@ export function IntegratedReport({ text }: { text: string }) {
   const productSectionIndex = detailSections.findIndex((section) => /コース|メニュー|料金/.test(section.title));
   return <ProductNames.Provider value={names}><div className="integrated-report report-document">
     {(!report.qualityVersion || report.qualityVersion < 2) && <p className="report-version-note">このレポートは保存時の内容を表示しています。調査範囲・根拠区分・実行手順を詳しく整理する新しい形式は、次の解析から適用されます。</p>}
+    {!!report.merge && <p className="report-reading-note">保存されたレポート{report.merge.sourceReportIds?.length ? `${report.merge.sourceReportIds.length}件` : ""}を突き合わせ、アプリの標準構成で1本にまとめた統合版です。</p>}
     <section className="report-summary"><span className="panel-kicker">EXECUTIVE SUMMARY</span><h3><ProductText text={report.overallAssessment || "総合評価"}/></h3><RichBody text={report.keyMessage || ""}/></section>
     <nav className="report-reading-nav" aria-label="レポートの読み進め方">{!!report.keyFindings.length && <a href="#report-findings">課題と根拠を見る <span>↓</span></a>}{!!actions.length && <a href="#report-actions">実行手順を見る <span>↓</span></a>}{!!report.researchCoverage?.length && <a href="#report-coverage">調査範囲を確かめる <span>↓</span></a>}{!!detailSections.length && <a href="#report-details">詳細な分析を読む <span>↓</span></a>}</nav>
     {!!firstActions.length && <section className="report-priorities"><div className="report-section-heading"><h3>{storeActions.length >= 3 ? "まず取り組む3項目" : "まず取り組むこと"}</h3></div><p className="report-reading-note">担当・時期・目標は実施案です。店舗で確認してから着手してください。</p><ol>{firstActions.map(({ action, index }) => <li key={index}><span className={`priority-tag priority-${action.priority}`}>{action.priority || index + 1}</span><a href={`#report-action-${index}`}><b><ProductText text={action.action}/></b><span><ProductText text={[priorityLabels[action.priority || ""], action.timing].filter(Boolean).join(" · ")}/></span></a><span aria-hidden="true">↓</span></li>)}</ol>{storeActions.length > 3 && <a className="all-actions-link" href="#report-actions-store">すべての施策と実行手順を見る（{storeActions.length}件） <span aria-hidden="true">↓</span></a>}</section>}
@@ -253,5 +274,6 @@ export function IntegratedReport({ text }: { text: string }) {
     {!!report.detailSections?.length && report.detailedReport && <section className="report-document-section"><header><h3>分析の前提と読み方</h3></header><RichBody text={report.detailedReport}/></section>}
     {productSectionIndex < 0 && inventoryTable}
     {detailSections.map((section,index) => <DocumentSection section={section} index={index} inventory={index === productSectionIndex ? inventoryTable : undefined} key={index}/>)}
+    {!!(report.conflicts?.length || report.provenance?.length) && !detailSections.some((section) => /突き合わせ|出典の整理/.test(section.title)) && <section id="report-reconciliation" className="report-document-section"><header><span className="chapter-number">{String(detailSections.length + 1).padStart(2, "0")}</span><h3>元レポートの突き合わせ</h3></header><p className="report-reading-note">矛盾や日付の違う記述は、新しい公式の一次情報を優先して整理しています。</p><ReconciliationDetails conflicts={report.conflicts} provenance={report.provenance}/></section>}
   </div></ProductNames.Provider>;
 }
