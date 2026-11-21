@@ -671,12 +671,19 @@ function validateReportQuality(report: Record<string, any>, input: any, availabl
   if (issues.length) throw new ReportQualityError(`統合レポートの内容構成を確認中です。${issues.join(" / ")}${unmatchedSources.length ? ` / 未照合URL例: ${unmatchedSources.slice(0, 3).map(url => clean(url, 160)).join(" , ")}` : ""}。取得済みの調査は保持し、追加生成を行わず確認します。`, unmatchedSources);
   return { version: 2, checkedAt: new Date().toISOString(), checks: ["required_sections", "selected_site_coverage", "finding_action_links", "action_completion_criteria", "source_traceability"] };
 }
+function isCheckerReport(row: any) {
+  return row?.source === "gourmet_checker";
+}
+function canReadReport(row: any, userId: string) {
+  return !!row && (row.user_id === userId || isCheckerReport(row));
+}
 function dbReport(row: any, followups: any[] = []) {
   return {
     id: row.id, runId: row.run_id ?? null, storeName: row.store_name, storeUrl: row.store_url, groupName: row.group_name,
     selectedSites: row.selected_sites, researchFocus: savedResearchFocus(row.report), createdAt: row.created_at, deletedAt: row.deleted_at ?? null, agents: row.agents ?? [],
     critique: row.critique ?? "", critiqueSources: row.critique_sources ?? [], report: row.report ?? "",
     reportSources: row.report_sources ?? [], followups: followups.map((item) => ({ question: item.question, answer: item.answer, sources: item.sources, at: item.created_at })),
+    source: row.source ?? "insight_studio", sourceUrl: row.source_url ?? null, shared: isCheckerReport(row),
   };
 }
 
@@ -1173,8 +1180,8 @@ export async function handleWorker(req: Request) {
 async function answerQuestion(db: any, userId: string, input: any, costDb: any) {
   const reportId = clean(input.reportId, 64), question = clean(input.question, 2000);
   if (!question) throw new Error("質問を入力してください");
-  const { data: report, error } = await db.from("restaurant_insight_reports").select("*").eq("id", reportId).eq("user_id", userId).single();
-  if (error || !report) throw new Error("レポートが見つかりません");
+  const { data: report, error } = await db.from("restaurant_insight_reports").select("*").eq("id", reportId).maybeSingle();
+  if (error || !canReadReport(report, userId) || (report.deleted_at && !isCheckerReport(report))) throw new Error("レポートが見つかりません");
   if (report.deleted_at) throw new Error("ゴミ箱のレポートは、復元してから質問してください");
   const { data: history, error: historyError } = await db.from("restaurant_insight_followups").select("question,answer,created_at").eq("report_id", reportId).eq("user_id", userId).order("created_at", { ascending: false }).limit(6);
   if (historyError) throw historyError;
@@ -1208,9 +1215,9 @@ async function fullReport(db: any, userId: string, row: any) {
   return dbReport(row, data ?? []);
 }
 async function reportState(db: any, admin: any, userId: string, reportId: string) {
-  const { data: row, error } = await db.from("restaurant_insight_reports").select("*").eq("id", reportId).eq("user_id", userId).maybeSingle();
+  const { data: row, error } = await db.from("restaurant_insight_reports").select("*").eq("id", reportId).maybeSingle();
   if (error) throw error;
-  if (row) return { state: row.deleted_at ? "trashed" : "active", report: await fullReport(db, userId, row) };
+  if (row && canReadReport(row, userId)) return { state: row.deleted_at ? "trashed" : "active", report: await fullReport(db, userId, row) };
   const { data: receipt, error: receiptError } = await admin.from("restaurant_insight_report_deletions").select("id").eq("id", reportId).eq("user_id", userId).maybeSingle();
   if (receiptError) throw receiptError;
   return { state: receipt ? "deleted" : "missing" };
@@ -1243,6 +1250,9 @@ async function manageReport(db: any, admin: any, userId: string, input: any) {
   const action = ({ trash_report: "trash", restore_report: "restore", delete_report: "delete" } as Record<string, string>)[input.action];
   if (!action) throw new Error("レポートの操作を確認してください");
   if (action === "delete" && input.confirm !== true) throw new Error("完全削除の確認が必要です");
+  const { data: existing, error: existingError } = await admin.from("restaurant_insight_reports").select("id,source,user_id").eq("id", reportId).maybeSingle();
+  if (existingError) throw existingError;
+  if (existing && isCheckerReport(existing)) throw new Error("共有レポートはゴミ箱へ移動したり削除したりできません。");
   const result = await rpc(admin, "restaurant_insight_manage_report", { p_user_id: userId, p_report_id: reportId, p_action: action, p_confirm: input.confirm === true });
   if (result.deleted) return { deleted: true, reportId };
   return { report: await fullReport(db, userId, result.report_row) };
@@ -1275,8 +1285,15 @@ export async function handleApi(req: Request) {
       return json({ run: run ? { runId: run.id, startedAt: run.started_at, storeName: run.input?.storeName ?? "店舗分析", researchFocus: normalizeResearchFocus(run.input?.researchFocus) } : null });
     }
     if (input.action === "list") {
-      const { data: rows, error } = await db.from("restaurant_insight_reports").select("*").eq("user_id", userId).is("deleted_at", null).order("created_at", { ascending: false }).limit(30);
-      if (error) throw error;
+      const [{ data: ownRows, error: ownError }, { data: sharedRows, error: sharedError }] = await Promise.all([
+        db.from("restaurant_insight_reports").select("*").eq("user_id", userId).is("deleted_at", null).order("created_at", { ascending: false }).limit(30),
+        db.from("restaurant_insight_reports").select("*").eq("source", "gourmet_checker").is("deleted_at", null).order("created_at", { ascending: false }).limit(100),
+      ]);
+      if (ownError) throw ownError;
+      if (sharedError) throw sharedError;
+      const merged = new Map<string, any>();
+      for (const row of [...(sharedRows ?? []), ...(ownRows ?? [])]) merged.set(row.id, row);
+      const rows = [...merged.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
       const ids = (rows ?? []).map((row: any) => row.id);
       const { data: followups, error: followupError } = ids.length
         ? await db.from("restaurant_insight_followups").select("*").eq("user_id", userId).in("report_id", ids).order("created_at", { ascending: true })
