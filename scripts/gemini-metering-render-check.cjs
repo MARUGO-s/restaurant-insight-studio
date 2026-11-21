@@ -14,6 +14,12 @@ const browserModules = {
   "./lib/api": { invoke: noNetwork },
   "./lib/supabase": { supabase: new Proxy({}, { get: noNetwork }) },
   "./StoreNameInput": {},
+  "./lib/store-identity": {
+    groupReportsByStore: () => [],
+    officialDisplayName: (name) => name,
+    officialDisplayUrl: (_name, url) => url,
+    storeIdentityKey: () => "store",
+  },
   "./ReportView": {},
   "./ReportShareControls": {},
   "./ReportTrash": {},

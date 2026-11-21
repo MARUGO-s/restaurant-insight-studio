@@ -195,3 +195,47 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
 @media print{
   .history-filters,.source-badge{display:none!important}
 }
+
+
+/* Merged reports: navy/purple to distinguish from Grok Bot gold and app green */
+.source-badge-merged{background:#eceaf7;color:#3d3a6e;border:1px solid #c9c4e3}
+.history-row-merged .history-item{border-left:3px solid #4a4580;padding-left:8px;border-radius:0 7px 7px 0}
+.merge-launch{margin:8px 4px 0;width:calc(100% - 8px);border:1px solid #d7d4e8;background:#f4f3fa;color:#3d3a6e;font-size:10px;font-weight:700;padding:8px 10px;border-radius:8px;text-align:left}
+.merge-panel h2{font-size:16px;margin:6px 0 0;letter-spacing:-.02em}
+.merge-group{border-top:1px solid var(--line);padding:10px 0 4px;margin-top:8px}
+.merge-group-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.merge-group-head b{font-size:12px}
+.merge-group-head span{font-size:10px;color:var(--muted)}
+.text-button{border:0;background:none;color:#3d3a6e;font-size:10px;font-weight:700;padding:0;text-decoration:underline}
+.merge-option{display:flex;align-items:flex-start;gap:8px;padding:7px 4px;border-radius:7px}
+.merge-option:hover{background:#f4f6f3}
+.merge-option-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.merge-option-title{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;font-weight:600}
+.merge-option small{color:#a1a59d;font-size:9px}
+.merge-mixed{display:flex;align-items:flex-start;gap:8px;font-size:11px;margin:10px 0;line-height:1.5}
+.merge-panel .primary-button{margin-top:8px;width:100%}
+@media(max-width:800px){
+  .merge-launch{display:block}
+  .merge-option-title{align-items:flex-start}
+}
+
+.history-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px}
+.history-filter{padding:5px 6px;letter-spacing:0;width:100%;text-align:center}
+.history-item-top{flex-direction:column;align-items:flex-start;gap:4px}
+.history-item-top b{overflow-wrap:break-word;word-break:normal;line-height:1.45}
+.form-panel label.merge-option{display:flex;align-items:flex-start;gap:8px;margin:0;font-weight:400;color:inherit}
+.merge-option-body{flex:1;min-width:0}
+.form-panel label.merge-option input,
+.form-panel .merge-option input{
+  display:inline-block;
+  width:auto;
+  height:auto;
+  margin:3px 0 0;
+  padding:0;
+  border:0;
+  border-radius:0;
+  box-shadow:none;
+  background:none;
+  flex:0 0 auto;
+  accent-color:#3d3a6e;
+}
