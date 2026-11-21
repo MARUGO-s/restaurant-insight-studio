@@ -167,3 +167,31 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
   .finding-verification{display:block}
   .finding-verification>div+div{margin-top:13px}
 }
+
+/* Source badges and list filters for Grok Bot vs in-app reports */
+.history-filters{display:flex;flex-wrap:wrap;gap:4px;padding:0 4px 8px}
+.history-filter{border:0;background:#eef2ee;color:#5a655c;font-size:9px;font-weight:700;padding:5px 8px;border-radius:999px;letter-spacing:.02em}
+.history-filter span{color:#8a9086;margin-left:3px}
+.history-filter.active{background:var(--green);color:#fff}
+.history-filter.active span{color:rgba(255,255,255,.82)}
+.history-item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:6px}
+.history-item-top b{min-width:0;flex:1}
+.source-badge{flex:0 0 auto;display:inline-flex;align-items:center;border-radius:999px;font-size:8px;font-weight:700;letter-spacing:.04em;padding:2px 6px;line-height:1.4;white-space:nowrap}
+.source-badge-checker{background:#f6efe3;color:#8a6a2e;border:1px solid #e4d3ae}
+.source-badge-app{background:var(--green-soft);color:#2f4636;border:1px solid #d5e0d6}
+.source-badge-md{font-size:9px;padding:3px 8px;letter-spacing:.06em}
+.history-row-checker .history-item{border-left:3px solid var(--gold);padding-left:8px;border-radius:0 7px 7px 0}
+.history-row-app .history-item{border-left:3px solid #6b9871;padding-left:8px;border-radius:0 7px 7px 0}
+.report-title-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 0}
+.report-title-row h2{margin:0}
+@media(max-width:800px){
+  .side-label.history-label,.history-filters,.history-list{display:block}
+  .history-filters{display:flex;margin-top:8px}
+  .history-list{display:flex;gap:8px;overflow-x:auto;padding:0 0 10px;-webkit-overflow-scrolling:touch}
+  .history-row{flex:0 0 210px;max-width:230px;align-items:stretch}
+  .history-item{width:100%}
+  .history-empty{flex:1 1 100%}
+}
+@media print{
+  .history-filters,.source-badge{display:none!important}
+}

@@ -27,7 +27,16 @@ type SiteTarget = { id: string; name: string; url: string };
 type Report = {
   id: string; runId?: string | null; storeName: string; storeUrl: string; groupName: string | null; createdAt: string;
   selectedSites?: SiteTarget[]; researchFocus?: string; deletedAt?: string | null; agents: Agent[]; critique: string; critiqueSources: string[]; report: string; reportSources: string[]; followups: Followup[];
+  source?: string; sourceUrl?: string | null; shared?: boolean;
 };
+type ReportFilter = "all" | "checker" | "app";
+function isSharedReport(report: { source?: string; shared?: boolean }) {
+  return report.shared === true || report.source === "gourmet_checker";
+}
+function ReportSourceBadge({ report, size = "sm" }: { report: { source?: string; shared?: boolean }; size?: "sm" | "md" }) {
+  const checker = isSharedReport(report);
+  return <span className={`source-badge source-badge-${checker ? "checker" : "app"}${size === "md" ? " source-badge-md" : ""}`}>{checker ? "Grok Bot" : "アプリ分析"}</span>;
+}
 type CostEvent = {
   id: string; user_id: string; run_id: string | null; report_id: string | null; operation: string; provider: string;
   model: string; request_status: "succeeded" | "failed" | "unknown"; measurement_status: "complete" | "partial" | "unknown";
@@ -256,6 +265,7 @@ export default function App() {
   const [costError, setCostError] = useState("");
   const [page, setPage] = useState<Page>("analysis");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
   const [session, setSession] = useState<Session | null>(null);
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
@@ -330,6 +340,8 @@ export default function App() {
   async function changeReport(action: ReportAction, target: TrashItem) {
     const userId = currentUserId.current, epoch = authEpoch.current;
     if (!userId || reportMutation.current || working === "question") return;
+    const known = reports.find((item) => item.id === target.id);
+    if ((action === "trash_report" || action === "delete_report") && known && isSharedReport(known)) return;
     reportMutation.current = true; ++reportRevision.current; setBusyReportId(target.id); setReportNotice(null);
     const current = () => currentUserId.current === userId && authEpoch.current === epoch;
     let updated: Report | undefined;
@@ -570,6 +582,13 @@ export default function App() {
     finally { if (current()) setWorking(null); }
   }
 
+  const visibleReports = useMemo(() => {
+    if (reportFilter === "checker") return reports.filter(isSharedReport);
+    if (reportFilter === "app") return reports.filter((report) => !isSharedReport(report));
+    return reports;
+  }, [reports, reportFilter]);
+  const checkerCount = useMemo(() => reports.filter(isSharedReport).length, [reports]);
+  const appCount = reports.length - checkerCount;
   const missing = [!health.openai && "OpenAI", !health.gemini && "Gemini", !health.xai && "xAI"].filter(Boolean);
   if (!session) return <main className="auth-screen"><div className="auth-card"><a className="brand auth-brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a><span className="eyebrow">PRIVATE RESEARCH WORKSPACE</span><h1>ログイン</h1><p>IDとパスワードでログインします。レポートはアカウントごとに分離して保存されます。</p><form onSubmit={signIn}><label>ID<input required type="text" name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="ID"/></label><label className="auth-password">パスワード<input required type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="パスワード"/></label><button className="primary-button" disabled={signingIn}>{signingIn ? "ログイン中…" : "ログイン"}</button></form>{error && <div className="error-banner">{error}</div>}<small className="auth-security">パスワードはSupabase Authで管理され、このアプリには保存されません。</small></div></main>;
   return <div className="app-shell">
@@ -580,11 +599,17 @@ export default function App() {
       <button className={`side-item ${page === "costs" ? "active" : ""}`} onClick={() => { setPage("costs"); void refreshCosts(); }}><span>＄</span>API料金</button>
       <button className={`side-item trash-nav ${page === "trash" ? "active" : ""}`} onClick={() => { setPage("trash"); void refreshTrash(); }}><TrashIcon/>ゴミ箱 <span className="trash-nav-count">{trashCount}</span></button>
       {page === "analysis" && <><div className="side-label history-label">保存したレポート <span>{reports.length}</span></div>
+      <div className="history-filters" role="tablist" aria-label="レポートの種類">
+        {([["all", "すべて", reports.length], ["checker", "Grok Bot", checkerCount], ["app", "アプリ", appCount]] as [ReportFilter, string, number][]).map(([id, label, count]) => (
+          <button key={id} type="button" role="tab" aria-selected={reportFilter === id} className={`history-filter ${reportFilter === id ? "active" : ""}`} onClick={() => setReportFilter(id)}>{label} <span>{count}</span></button>
+        ))}
+      </div>
       <div className="history-list">
-        {reports.map((report) => <div className="history-row" key={report.id}><button onClick={() => { setSelectedId(report.id); setTab("report"); }} className={`history-item ${selected?.id === report.id ? "selected" : ""}`}>
-          <b>{report.storeName}</b><small>{dateLabel(report.createdAt)}</small>
-        </button><button type="button" className="history-trash" title="ゴミ箱へ移動" aria-label={`${report.storeName} ${reportDate(report.createdAt)}をゴミ箱へ移動`} disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", report); }}><TrashIcon/></button></div>)}
+        {visibleReports.map((report) => <div className={`history-row ${isSharedReport(report) ? "history-row-checker" : "history-row-app"}`} key={report.id}><button onClick={() => { setSelectedId(report.id); setTab("report"); }} className={`history-item ${selected?.id === report.id ? "selected" : ""}`}>
+          <span className="history-item-top"><b>{report.storeName}</b><ReportSourceBadge report={report} /></span><small>{dateLabel(report.createdAt)}</small>
+        </button>{!isSharedReport(report) && <button type="button" className="history-trash" title="ゴミ箱へ移動" aria-label={`${report.storeName} ${reportDate(report.createdAt)}をゴミ箱へ移動`} disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", report); }}><TrashIcon/></button>}</div>)}
         {!reports.length && <p className="muted history-empty">分析を実行すると、レポートがここに保存されます。</p>}
+        {!!reports.length && !visibleReports.length && <p className="muted history-empty">この条件のレポートはありません。</p>}
       </div></>}
       <div className="sidebar-bottom"><span className={`local-dot ${missing.length ? "needs-keys" : ""}`} />SUPABASE PRIVATE DATA<br /><small>利用者ごとに分離して保存</small></div>
     </aside>
@@ -656,7 +681,7 @@ export default function App() {
           {activeRun && <RunProgress run={activeRun} state={runState} polling={polling} retrying={retrying} busy={working === "question"} notice={runNotice} onRetry={() => { void retryAnalysisRun(); }} onRegenerate={() => { void regenerateSynthesis(); }} onCheck={() => { const userId = currentUserId.current; if (userId && !working && !retrying && !runMutation.current) void completeAnalysisRun(activeRun, userId); }} onClose={closeFailedAnalysisRun}/>}
           {working === "analysis" && !activeRun && <div className="panel live-progress"><div className="spinner large"/><div><b>調査の開始を確認しています</b><span>解析が登録されると、各調査の進行状況を表示します。</span></div></div>}
           {selected ? <>
-            <section className="report-heading panel"><div><span className="eyebrow">ANALYSIS REPORT · {dateLabel(selected.createdAt)}</span><h2>{selected.storeName}</h2><a href={selected.storeUrl} target="_blank" rel="noreferrer">{selected.storeUrl} ↗</a><div className="selected-site-tags">{(selected.selectedSites ?? []).map((site) => <span key={site.id}>{site.name}</span>)}</div></div><div className="report-header-actions"><span className={`complete-badge ${selected.agents.some((agent) => agent.status !== "done") ? "partial-badge" : ""}`}><i/>{selected.agents.some((agent) => agent.status !== "done") ? "一部の調査が未完了" : "レポート作成完了"}</span><div className="report-action-buttons"><button type="button" onClick={() => window.print()}>印刷・PDF保存</button><ReportShareControls key={`${session.user.id}:${selected.id}`} reportId={selected.id} storeName={selected.storeName} disabled={!!busyReportId || working === "question"}/><button type="button" className="report-trash-button" disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", selected); }}><TrashIcon/>ゴミ箱へ移動</button></div></div></section>
+            <section className="report-heading panel"><div><span className="eyebrow">ANALYSIS REPORT · {dateLabel(selected.createdAt)}</span><div className="report-title-row"><h2>{selected.storeName}</h2><ReportSourceBadge report={selected} size="md" /></div><a href={selected.storeUrl} target="_blank" rel="noreferrer">{selected.storeUrl} ↗</a><div className="selected-site-tags">{(selected.selectedSites ?? []).map((site) => <span key={site.id}>{site.name}</span>)}</div></div><div className="report-header-actions"><span className={`complete-badge ${selected.agents.some((agent) => agent.status !== "done") ? "partial-badge" : ""}`}><i/>{selected.agents.some((agent) => agent.status !== "done") ? "一部の調査が未完了" : "レポート作成完了"}</span><div className="report-action-buttons"><button type="button" onClick={() => window.print()}>印刷・PDF保存</button>{!isSharedReport(selected) && <><ReportShareControls key={`${session.user.id}:${selected.id}`} reportId={selected.id} storeName={selected.storeName} disabled={!!busyReportId || working === "question"}/><button type="button" className="report-trash-button" disabled={!!busyReportId || working === "question"} onClick={() => { void changeReport("trash_report", selected); }}><TrashIcon/>ゴミ箱へ移動</button></>}</div></div></section>
             <ResearchFocusNote text={selected.researchFocus}/>
             {selected.agents.some((agent) => agent.status !== "done") && <div className="coverage-notice"><b>取得範囲が限られた調査があります</b><p>{selected.agents.filter((agent) => agent.status !== "done").map((agent) => agentTitle(agent.id)).join("・")}の専門調査は一部取得または取得失敗となりました。詳細な取得状況は「専門AIの調査」に表示します。このレポートの判断は、確認できた情報の範囲に限られます。</p></div>}
             <nav className="tabs">{([["report","統合レポート"],["agents","専門AIの調査"],["critique","反証・確認事項"]] as [Tab,string][]).map(([id,label]) => <button key={id} onClick={() => setTab(id)} className={tab === id ? "current" : ""}>{label}</button>)}</nav>
