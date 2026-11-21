@@ -219,8 +219,23 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
   .merge-option-title{align-items:flex-start}
 }
 
-.history-filters{gap:3px}
-.history-filter{padding:5px 7px}
-.history-item-top b{overflow-wrap:anywhere;word-break:break-word}
+.history-filters{gap:3px;row-gap:5px}
+.history-filter{padding:5px 6px;letter-spacing:0}
+.history-item-top{flex-wrap:wrap}
+.history-item-top b{overflow-wrap:break-word;word-break:normal;line-height:1.45}
 .form-panel label.merge-option{display:flex;align-items:flex-start;gap:8px;margin:0;font-weight:400;color:inherit}
-.merge-option input{margin-top:3px;flex:0 0 auto}
+.merge-option-body{flex:1;min-width:0}
+.form-panel label.merge-option input,
+.form-panel .merge-option input{
+  display:inline-block;
+  width:auto;
+  height:auto;
+  margin:3px 0 0;
+  padding:0;
+  border:0;
+  border-radius:0;
+  box-shadow:none;
+  background:none;
+  flex:0 0 auto;
+  accent-color:#3d3a6e;
+}
