@@ -191,7 +191,10 @@ function DirectPageStatus({ pages }: { pages?: DirectPageReceipt[] }) {
   </section>;
 }
 const sumPrices = (events: CostEvent[]) => events.reduce((sum, event) => sum + (event.list_price_usd ?? 0), 0);
-const operationNames: Record<string, string> = { market_research: "市場・競合調査", gourmet_research: "グルメ媒体調査", gourmet_fallback_research: "グルメ媒体調査（過去の代替AI）", social_research: "X・SNS調査", social_recent: "Xの直近の声", social_history: "Xの過去の傾向・反証", fact_check: "反証・確認", synthesis: "レポート統合", fact_check_synthesis: "反証・統合", followup_question: "レポートへの質問", provider_diagnostic: "Gemini接続確認" };
+const operationNames: Record<string, string> = { market_research: "市場・競合調査", gourmet_research: "グルメ媒体調査", gourmet_fallback_research: "グルメ媒体調査（過去の代替AI）", social_research: "X・SNS調査", social_recent: "Xの直近の声", social_history: "Xの過去の傾向・反証", fact_check: "反証・確認", synthesis: "レポート統合", fact_check_synthesis: "反証・統合", report_merge: "レポート統合", followup_question: "レポートへの質問", provider_diagnostic: "Gemini接続確認" };
+function costRunItemLabel(event: CostEvent) {
+  return [operationNames[event.operation] ?? event.operation, event.model].filter(Boolean).join(" ");
+}
 
 function RunProgress({ run, state, polling, retrying, busy, notice, onRetry, onRegenerate, onCheck, onClose }: { run: ActiveRun; state: RunState | null; polling: boolean; retrying: boolean; busy: boolean; notice: string; onRetry: () => void; onRegenerate: () => void; onCheck: () => void; onClose: () => void }) {
   const [now, setNow] = useState(Date.now());
@@ -254,7 +257,7 @@ function CostPage({ reports, costs, loading, error, onRefresh }: { reports: Repo
         const report = reportByRun.get(runId); const known = events.every((event) => event.list_price_usd != null); const total = sumPrices(events);
         const providers = [...new Set(events.map((event) => event.provider))];
         const archived = events.find((event) => event.report_name);
-        return <article className="cost-run" key={runId}><div className="cost-run-head"><div><b>{report?.storeName ?? archived?.report_name ?? "レポート未作成の分析"}{events.some((event) => event.report_deleted_at) ? "（レポート削除済み）" : report?.deletedAt ? "（ゴミ箱）" : ""}</b><small>{dateLabel(events[0]?.created_at ?? "")} · {providers.join(" / ")}</small></div><strong>{known ? formatYenEstimate(total) : `判明分 ${formatYenEstimate(total)} + 未算定`}</strong></div><div className="cost-run-breakdown">{events.map((event) => <span key={event.id}>{event.provider} {event.model}: {formatYenEstimate(event.list_price_usd)}</span>)}</div></article>;
+        return <article className="cost-run" key={runId}><div className="cost-run-head"><div><b>{report?.storeName ?? archived?.report_name ?? "レポート未作成の分析"}{events.some((event) => event.report_deleted_at) ? "（レポート削除済み）" : report?.deletedAt ? "（ゴミ箱）" : ""}</b><small>{dateLabel(events[0]?.created_at ?? "")} · {providers.join(" / ")}</small></div><strong>{known ? formatYenEstimate(total) : `判明分 ${formatYenEstimate(total)} + 未算定`}</strong></div><div className="cost-run-breakdown">{events.map((event) => <span key={event.id}>{costRunItemLabel(event)}: {formatYenEstimate(event.list_price_usd)}</span>)}</div></article>;
       })}</div>}
     </article>
     <article className="panel cost-section"><header><div><span className="panel-kicker">REQUEST LEDGER</span><h3>API呼び出し明細</h3></div></header>
