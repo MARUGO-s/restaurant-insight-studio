@@ -6,6 +6,7 @@ import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
 import { LoginForm } from "./LoginForm";
+import { MergeDialog } from "./MergeDialog";
 import { clearRememberedLogin, loadRememberedLogin, offerBrowserPasswordSave, rememberedLoginMatches, saveRememberedLogin } from "./lib/remembered-login";
 import { invoke } from "./lib/api";
 import { IntegratedReport, TextPanel, SourceLinks, SpecialistResearch } from "./ReportView";
@@ -286,6 +287,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
   const [mergeSelectedIds, setMergeSelectedIds] = useState<string[]>([]);
+  const [mergeOpen, setMergeOpen] = useState(false);
   const [confirmMixedStores, setConfirmMixedStores] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
   const [loginId, setLoginId] = useState(() => loadRememberedLogin()?.loginId ?? "");
@@ -583,6 +585,7 @@ export default function App() {
     }
     const selectedSites = [...siteMap.values()].slice(0, 12);
     if (!selectedSites.length) selectedSites.push({ id: "official", name: "公式サイト", url });
+    setMergeOpen(false);
     setWorking("analysis"); setRunState(null); setRunNotice(""); setError("");
     try {
       const started = await invoke<{ runId: string }>({ action: "merge_reports", storeName: store, storeUrl: url, groupName: chosen[0].groupName, selectedSites, reportIds: chosen.map((report) => report.id), confirmMixedStores: keys.size > 1 });
@@ -668,7 +671,6 @@ export default function App() {
   const checkerCount = useMemo(() => reports.filter((report) => reportKind(report) === "checker").length, [reports]);
   const mergedCount = useMemo(() => reports.filter(isMergedReport).length, [reports]);
   const appCount = reports.length - checkerCount - mergedCount;
-  const mergeGroups = useMemo(() => groupReportsByStore(reports), [reports]);
   useEffect(() => {
     setMergeSelectedIds((ids) => {
       const live = ids.filter((id) => reports.some((report) => report.id === id));
@@ -701,7 +703,7 @@ export default function App() {
         {!reports.length && <p className="muted history-empty">分析を実行すると、レポートがここに保存されます。</p>}
         {!!reports.length && !visibleReports.length && <p className="muted history-empty">この条件のレポートはありません。</p>}
       </div>
-      {reports.length >= 2 && <button type="button" className="merge-launch" disabled={!!working || !!activeRun || discoveringRun} onClick={() => document.getElementById("merge-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}>同じ店舗のレポートを統合</button>}
+      {reports.length >= 2 && <button type="button" className="merge-launch" onClick={() => { setPage("analysis"); setMergeOpen(true); }}>同じ店舗のレポートを統合</button>}
       </>}
       <div className="sidebar-bottom"><span className={`local-dot ${missing.length ? "needs-keys" : ""}`} />SUPABASE PRIVATE DATA<br /><small>利用者ごとに分離して保存</small></div>
     </aside>
@@ -764,37 +766,7 @@ export default function App() {
             <div className="privacy-note">公開情報を対象に調査します。AI APIキーはSupabase Edge Functionからのみ利用します。</div>
           </form>
 
-          <section id="merge-panel" className="panel form-panel merge-panel">
-            <span className="panel-kicker">MERGE REPORTS</span>
-            <h2>同じ店舗のレポートを統合</h2>
-            <p className="form-intro muted">見えるレポート（自分のアプリ分析と Grok Bot の共有レポート）を突き合わせ、gpt-6.2-astra で1本の「統合版」に作り直します。結果は自分だけが閲覧・質問・削除できます。</p>
-            {mergeGroups.length ? mergeGroups.map((group) => <div className="merge-group" key={group.key}>
-              <div className="merge-group-head">
-                <b>{group.storeName}</b>
-                <span>{group.reports.length}件</span>
-                {group.reports.length >= 2 && <button type="button" className="text-button" onClick={() => setMergeSelectedIds(group.reports.map((report) => report.id))}>この店舗を選ぶ</button>}
-              </div>
-              {group.reports.map((report) => {
-                const checked = mergeSelectedIds.includes(report.id);
-                return <label className="merge-option" key={report.id}>
-                  <input type="checkbox" checked={checked} onChange={() => setMergeSelectedIds((ids) => checked ? ids.filter((id) => id !== report.id) : [...ids, report.id])}/>
-                  <span className="merge-option-body">
-                    <span className="merge-option-title">{report.storeName}<ReportSourceBadge report={report} /></span>
-                    <small>{dateLabel(report.createdAt)}</small>
-                  </span>
-                </label>;
-              })}
-            </div>) : <p className="muted history-empty">統合できるレポートがまだありません。</p>}
-            {(() => {
-              const chosen = reports.filter((report) => mergeSelectedIds.includes(report.id));
-              const mixed = new Set(chosen.map((report) => storeIdentityKey(report.storeName, report.storeUrl))).size > 1;
-              return <>
-                {mixed && <label className="merge-mixed"><input type="checkbox" checked={confirmMixedStores} onChange={(event) => setConfirmMixedStores(event.target.checked)}/>異なる店舗のレポートを含めて統合することを確認しました</label>}
-                <button type="button" className="primary-button" disabled={!!working || !!activeRun || discoveringRun || mergeSelectedIds.length < 2 || (mixed && !confirmMixedStores)} onClick={() => { void startMerge(); }}>{working === "analysis" && activeRun?.kind === "merge" ? "統合しています…" : `選んだ${mergeSelectedIds.length}件を統合する`}</button>
-              </>;
-            })()}
-          </section>
-          <div className="panel process-panel"><div className="panel-kicker">調査の進め方</div><div className="process-step"><i>01</i><div><b>分野別に調査</b><small>3つのAIがそれぞれ独立して検索</small></div></div><div className="process-step"><i>02</i><div><b>相互に検証</b><small>矛盾・反証・未確認を整理</small></div></div><div className="process-step"><i>03</i><div><b>統合レポート</b><small>出典付きの優先施策にまとめる</small></div></div></div>
+                    <div className="panel process-panel"><div className="panel-kicker">調査の進め方</div><div className="process-step"><i>01</i><div><b>分野別に調査</b><small>3つのAIがそれぞれ独立して検索</small></div></div><div className="process-step"><i>02</i><div><b>相互に検証</b><small>矛盾・反証・未確認を整理</small></div></div><div className="process-step"><i>03</i><div><b>統合レポート</b><small>出典付きの優先施策にまとめる</small></div></div></div>
         </section>
 
         <section className="result-column">
@@ -820,6 +792,7 @@ export default function App() {
         </section>
       </div>}
     </main>
+      {mergeOpen && <MergeDialog reports={reports} selectedIds={mergeSelectedIds} confirmMixedStores={confirmMixedStores} busy={!!working || !!activeRun || discoveringRun} onToggle={(id) => setMergeSelectedIds((ids) => ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id])} onSelectGroup={setMergeSelectedIds} onConfirmMixedChange={setConfirmMixedStores} onClose={() => setMergeOpen(false)} onStart={() => { void startMerge(); }} />}
     {deleteTarget && <DeleteReportDialog report={deleteTarget} busy={!!busyReportId} onCancel={() => setDeleteTarget(null)} onConfirm={() => { void changeReport("delete_report", deleteTarget); }}/>}
   </div>;
 }

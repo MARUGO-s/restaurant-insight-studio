@@ -239,3 +239,9 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
   flex:0 0 auto;
   accent-color:#3d3a6e;
 }
+
+.merge-dialog-backdrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;padding:24px 16px;background:rgba(32,36,31,.45);backdrop-filter:blur(3px)}
+.merge-dialog{width:min(100%,560px);max-height:min(88vh,760px);overflow:auto;background:var(--paper);box-shadow:0 16px 48px rgba(32,36,31,.18)}
+.merge-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.merge-dialog-head h2{margin:6px 0 0}
+.merge-empty-note{background:#f4f3fa;border:1px solid #d7d4e8;color:#3d3a6e;border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.7;margin:0 0 8px}
