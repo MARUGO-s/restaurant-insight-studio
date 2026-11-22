@@ -5,6 +5,8 @@ import { groupReportsByStore, officialDisplayName, officialDisplayUrl, storeIden
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
+import { LoginForm } from "./LoginForm";
+import { clearRememberedLogin, loadRememberedLogin, offerBrowserPasswordSave, rememberedLoginMatches, saveRememberedLogin } from "./lib/remembered-login";
 import { invoke } from "./lib/api";
 import { IntegratedReport, TextPanel, SourceLinks, SpecialistResearch } from "./ReportView";
 import { ReportShareControls } from "./ReportShareControls";
@@ -286,8 +288,10 @@ export default function App() {
   const [mergeSelectedIds, setMergeSelectedIds] = useState<string[]>([]);
   const [confirmMixedStores, setConfirmMixedStores] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
-  const [loginId, setLoginId] = useState("");
-  const [password, setPassword] = useState("");
+  const [loginId, setLoginId] = useState(() => loadRememberedLogin()?.loginId ?? "");
+  const [password, setPassword] = useState(() => loadRememberedLogin()?.password ?? "");
+  const [rememberLogin, setRememberLogin] = useState(() => !!loadRememberedLogin());
+  const [hasRememberedLogin, setHasRememberedLogin] = useState(() => !!loadRememberedLogin());
   const [signingIn, setSigningIn] = useState(false);
   const [health, setHealth] = useState<Health>({ openai: false, gemini: false, xai: false });
   const [storeName, setStoreName] = useState("マルゴ四谷");
@@ -501,14 +505,42 @@ export default function App() {
     return () => { alive = false; subscription.unsubscribe(); activePoll.current?.controller.abort(); activePoll.current = null; currentUserId.current = null; authEpoch.current += 1; };
   }, []);
 
+  function clearSavedLogin() {
+    clearRememberedLogin();
+    setRememberLogin(false);
+    setHasRememberedLogin(false);
+  }
+  function changeRememberLogin(checked: boolean) {
+    setRememberLogin(checked);
+    if (!checked) {
+      clearRememberedLogin();
+      setHasRememberedLogin(false);
+    }
+  }
+  function forgetRememberedLogin() {
+    clearSavedLogin();
+    setPassword("");
+  }
   async function signIn(event: FormEvent) {
     event.preventDefault();
     if (signingIn) return;
     setError(""); setSigningIn(true);
     try {
+      const usedRemembered = rememberedLoginMatches(loginId, password);
       const { error: authError } = await supabase.auth.signInWithPassword({ email: loginEmailFromId(loginId), password });
-      if (authError) setError(/invalid login credentials/i.test(authError.message) ? "IDまたはパスワードが正しくありません。" : authError.message);
-      else setPassword("");
+      if (authError) {
+        setError(/invalid login credentials/i.test(authError.message) ? "IDまたはパスワードが正しくありません。" : authError.message);
+        if (/invalid login credentials/i.test(authError.message) && usedRemembered) clearSavedLogin();
+      } else {
+        if (rememberLogin) {
+          saveRememberedLogin(loginId, password);
+          setHasRememberedLogin(true);
+          void offerBrowserPasswordSave(loginId, password);
+        } else {
+          clearSavedLogin();
+        }
+        setPassword("");
+      }
     } catch {
       setError("ログインサーバーに接続できませんでした。通信状態を確認してもう一度お試しください。");
     } finally { setSigningIn(false); }
@@ -648,7 +680,7 @@ export default function App() {
     });
   }, [reports, selected]);
   const missing = [!health.openai && "OpenAI", !health.gemini && "Gemini", !health.xai && "xAI"].filter(Boolean);
-  if (!session) return <main className="auth-screen"><div className="auth-card"><a className="brand auth-brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a><span className="eyebrow">PRIVATE RESEARCH WORKSPACE</span><h1>ログイン</h1><p>IDとパスワードでログインします。レポートはアカウントごとに分離して保存されます。</p><form onSubmit={signIn}><label>ID<input required type="text" name="username" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="ID"/></label><label className="auth-password">パスワード<input required type="password" name="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="パスワード"/></label><button className="primary-button" disabled={signingIn}>{signingIn ? "ログイン中…" : "ログイン"}</button></form>{error && <div className="error-banner">{error}</div>}<small className="auth-security">パスワードはSupabase Authで管理され、このアプリには保存されません。</small></div></main>;
+  if (!session) return <LoginForm loginId={loginId} password={password} rememberLogin={rememberLogin} hasRememberedLogin={hasRememberedLogin} signingIn={signingIn} error={error} onLoginIdChange={setLoginId} onPasswordChange={setPassword} onRememberChange={changeRememberLogin} onClearRemembered={forgetRememberedLogin} onSubmit={signIn}/>;
   return <div className="app-shell">
     <aside className="sidebar">
       <a className="brand" href="#top"><span className="brand-mark">R</span><span><b>Restaurant</b><small>INSIGHT STUDIO</small></span></a>
