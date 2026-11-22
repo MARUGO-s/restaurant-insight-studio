@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { costExplanation, formatYenEstimate, usdJpyReference } from "./lib/costs";
 import { StoreNameInput, officialStoreUrl, STORE_CATALOG } from "./StoreNameInput";
 import { groupReportsByStore, officialDisplayName, officialDisplayUrl, storeIdentityKey } from "./lib/store-identity";
+import { normalizeMergeSites } from "../supabase/functions/restaurant-analysis/merge-sites";
 import type { FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { displayLoginId, loginEmailFromId, supabase } from "./lib/supabase";
@@ -317,6 +318,7 @@ export default function App() {
   const [discoveringRun, setDiscoveringRun] = useState(false);
   const [runNotice, setRunNotice] = useState("");
   const [error, setError] = useState("");
+  const [errorTitle, setErrorTitle] = useState("処理を完了できませんでした");
   const [loading, setLoading] = useState(true);
   const currentUserId = useRef<string | null>(null);
   const authEpoch = useRef(0);
@@ -560,7 +562,7 @@ export default function App() {
     if (customSites.some((site) => (!!site.name.trim() !== !!site.url.trim()))) { setError("その他のサイトはサイト名とURLの両方を入力してください"); return; }
     const focus = researchFocus.trim();
     if (focus.length > RESEARCH_FOCUS_LIMIT) { setError("特に調べてほしいことは2,000文字以内で入力してください"); return; }
-    setWorking("analysis"); setRunState(null); setRunNotice(""); setError("");
+    setWorking("analysis"); setRunState(null); setRunNotice(""); setError(""); setErrorTitle("処理を完了できませんでした");
     try {
       const started = await invoke<{ runId: string }>({ action: "analyze", storeName, storeUrl, groupName, selectedSites, ...(focus ? { researchFocus: focus } : {}) });
       const run = { runId: started.runId, storeName, startedAt: new Date().toISOString(), researchFocus: focus, kind: "analyze" as const };
@@ -574,26 +576,22 @@ export default function App() {
     const userId = currentUserId.current, epoch = authEpoch.current;
     if (!userId || working || activeRun || discoveringRun) return;
     const chosen = reports.filter((report) => mergeSelectedIds.includes(report.id));
-    if (chosen.length < 2) { setError("統合するレポートを2件以上選んでください"); return; }
+    if (chosen.length < 2) { setErrorTitle("レポートの統合を開始できませんでした"); setError("統合するレポートを2件以上選んでください"); return; }
     const keys = new Set(chosen.map((report) => storeIdentityKey(report.storeName, report.storeUrl)));
-    if (keys.size > 1 && !confirmMixedStores) { setError("異なる店舗のレポートが混ざっています。内容を確認し、確認用のチェックを入れてから実行してください。"); return; }
+    if (keys.size > 1 && !confirmMixedStores) { setErrorTitle("レポートの統合を開始できませんでした"); setError("異なる店舗のレポートが混ざっています。内容を確認し、確認用のチェックを入れてから実行してください。"); return; }
     const store = officialDisplayName(chosen[0].storeName, chosen[0].storeUrl);
     const url = officialDisplayUrl(store, chosen[0].storeUrl);
-    const siteMap = new Map<string, { id: string; name: string; url: string }>();
-    for (const report of chosen) for (const site of report.selectedSites ?? []) {
-      if (site?.id && !siteMap.has(site.id)) siteMap.set(site.id, { id: site.id, name: site.name || site.id, url: site.url || "" });
-    }
-    const selectedSites = [...siteMap.values()].slice(0, 12);
-    if (!selectedSites.length) selectedSites.push({ id: "official", name: "公式サイト", url });
+    const selectedSites = normalizeMergeSites(chosen.flatMap((report) => report.selectedSites ?? []), url);
+    if (!selectedSites.length && url) selectedSites.push({ id: "official", name: "公式サイト", url });
     setMergeOpen(false);
-    setWorking("analysis"); setRunState(null); setRunNotice(""); setError("");
+    setWorking("analysis"); setRunState(null); setRunNotice(""); setError(""); setErrorTitle("レポートの統合を開始できませんでした");
     try {
       const started = await invoke<{ runId: string }>({ action: "merge_reports", storeName: store, storeUrl: url, groupName: chosen[0].groupName, selectedSites, reportIds: chosen.map((report) => report.id), confirmMixedStores: keys.size > 1 });
       const run = { runId: started.runId, storeName: store, startedAt: new Date().toISOString(), kind: "merge" as const };
       saveActiveRun(userId, run);
       if (currentUserId.current !== userId || authEpoch.current !== epoch) return;
       await completeAnalysisRun(run, userId);
-    } catch (e) { if (currentUserId.current === userId && authEpoch.current === epoch) setError(e instanceof Error ? e.message : "レポートの統合を開始できませんでした"); }
+    } catch (e) { if (currentUserId.current === userId && authEpoch.current === epoch) { setErrorTitle("レポートの統合を開始できませんでした"); setError(e instanceof Error ? e.message : "もう一度お試しください。"); } }
     finally { if (currentUserId.current === userId && authEpoch.current === epoch) setWorking(null); }
   }
   async function retryAnalysisRun() {
@@ -771,7 +769,7 @@ export default function App() {
 
         <section className="result-column">
           {missing.length > 0 && <div className="config-banner"><b>AI APIキーの設定が必要です</b><span>{missing.join("・")}のキーをSupabase DashboardのEdge Functions → Secretsに登録してください。キーはDBテーブルやブラウザーには保存しません。</span></div>}
-          {error && <div className="error-banner"><b>処理を完了できませんでした</b><span>{error}</span></div>}
+          {error && <div className="error-banner"><b>{errorTitle}</b><span>{error}</span></div>}
           {!activeRun && runNotice && <div className="run-connection-notice" role="status">{runNotice}</div>}
           {activeRun && <RunProgress run={activeRun} state={runState} polling={polling} retrying={retrying} busy={working === "question"} notice={runNotice} onRetry={() => { void retryAnalysisRun(); }} onRegenerate={() => { void regenerateSynthesis(); }} onCheck={() => { const userId = currentUserId.current; if (userId && !working && !retrying && !runMutation.current) void completeAnalysisRun(activeRun, userId); }} onClose={closeFailedAnalysisRun}/>}
           {working === "analysis" && !activeRun && <div className="panel live-progress"><div className="spinner large"/><div><b>開始を確認しています</b><span>受付が完了すると、進行状況を表示します。</span></div></div>}

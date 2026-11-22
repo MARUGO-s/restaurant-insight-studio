@@ -7,6 +7,7 @@ import { type DirectPage, directPageEvidence, directPageReceipts, loadDirectPage
 import { googleMapsPlacePath } from "./google-maps-profile.ts";
 import { newReportShareToken } from "../_shared/report-share-token.ts";
 import { officialDisplayName, officialDisplayUrl, storeIdentityKey } from "./store-identity.ts";
+import { normalizeMergeSites } from "./merge-sites.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void };
 
@@ -1254,7 +1255,7 @@ async function queueMerge(db: any, userId: string, input: any) {
   const storeName = officialDisplayName(clean(input.storeName, 120) || first.store_name, clean(input.storeUrl, 600) || first.store_url);
   const storeUrl = officialDisplayUrl(storeName, clean(input.storeUrl, 600) || first.store_url);
   if (!storeName || !storeUrl) throw new Error("店舗名と公式サイトURLを確認してください");
-  const selectedSites = normalizeSites(input.selectedSites?.length ? input.selectedSites : reports.flatMap((row: any) => row.selected_sites ?? []));
+  const selectedSites = normalizeMergeSites(input.selectedSites?.length ? input.selectedSites : reports.flatMap((row: any) => row.selected_sites ?? []), storeUrl);
   const sites = selectedSites.length ? selectedSites : [{ id: "official", name: "公式サイト", url: storeUrl }];
   return await rpc(db, "restaurant_insight_queue_merge_run", {
     p_user_id: userId,
