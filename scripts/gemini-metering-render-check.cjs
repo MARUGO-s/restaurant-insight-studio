@@ -69,8 +69,8 @@ const expected = new Map([
 globalThis.fetch = noNetwork;
 // Expose the real cost page to the test without changing the production module.
 const { CostPage } = loadComponent("App.tsx", "\nexport { CostPage };\n");
-const renderCosts = (costs, Component = CostPage) => renderToStaticMarkup(React.createElement(Component, {
-  reports: [], costs, loading: false, error: "", onRefresh: noNetwork,
+const renderCosts = (costs, Component = CostPage, reports = []) => renderToStaticMarkup(React.createElement(Component, {
+  reports, costs, loading: false, error: "", onRefresh: noNetwork,
 }));
 for (const { label, row } of scenarios) {
   assert.ok(expected.has(label), `Unexpected or repeated case ${label}`);
@@ -115,7 +115,19 @@ try {
   assert.match(summary, /日本銀行の中心相場（2026年11月19日）/);
   assert.match(summary, /<span>質問への回答<\/span><b>13\.04円<\/b>/);
   assert.match(summary, /<strong>判明分 6\.34円 \+ 未算定<\/strong>/);
-  assert.match(summary, /class="cost-run-breakdown"><span>Google Gemini gemini-3\.8-flash: 6\.34円<\/span>/);
+  assert.match(summary, /class="cost-run-breakdown"><span>グルメ媒体調査 gemini-3\.8-flash: 6\.34円<\/span>/);
+
+  const astraSummary = renderCosts([
+    { id: "merge-cost", user_id: "user-1", run_id: "merge-run", report_id: "merged-report", operation: "report_merge", provider: "OpenAI", model: "gpt-6.2-astra", request_status: "succeeded", measurement_status: "complete", usage: { input_tokens: 1000, output_tokens: 200 }, rates: {}, list_price_usd: 0.98, pricing_as_of: "2026-11-21", created_at: "2026-11-21T13:16:00Z" },
+    { id: "synth-cost", user_id: "user-1", run_id: "analysis-run", report_id: "analysis-report", operation: "fact_check_synthesis", provider: "OpenAI", model: "gpt-6.2-astra", request_status: "succeeded", measurement_status: "complete", usage: { input_tokens: 2000, output_tokens: 400 }, rates: {}, list_price_usd: 1.62, pricing_as_of: "2026-11-20", created_at: "2026-11-20T05:25:00Z" },
+  ], undefined, [
+    { runId: "merge-run", storeName: "ビストロ サヴァサヴァ" },
+  ]);
+  assert.match(astraSummary, /ビストロ サヴァサヴァ/);
+  assert.match(astraSummary, /レポート統合 gpt-6\.2-astra: 156\.40円/);
+  assert.match(astraSummary, /反証・統合 gpt-6\.2-astra: 258\.54円/);
+  assert.match(astraSummary.split('class="cost-event-list"')[1], /レポート統合/);
+  assert.match(astraSummary.split('class="cost-event-list"')[1], /gpt-6\.2-astra/);
 
   browserModules["./boj-usd-jpy.json"] = {
     yenPerDollar: 160.25,
