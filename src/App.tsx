@@ -13,6 +13,7 @@ import { invoke } from "./lib/api";
 import { IntegratedReport, TextPanel, SourceLinks, SpecialistResearch } from "./ReportView";
 import { ReportShareControls } from "./ReportShareControls";
 import { TrashPage, TrashIcon, DeleteReportDialog, reportDate } from "./ReportTrash";
+import { FileIcon, ReferenceFilesPage } from "./ReferenceFilesPage";
 import type { TrashItem } from "./ReportTrash";
 import { GeminiConnectionCheck, ProviderErrorDetails } from "./ProviderDiagnostics";
 import type { ProviderDiagnosticError } from "./ProviderDiagnostics";
@@ -63,7 +64,7 @@ type CostEvent = {
 };
 type Health = { openai: boolean; gemini: boolean; xai: boolean };
 type Tab = "report" | "agents" | "critique";
-type Page = "analysis" | "costs" | "trash";
+type Page = "analysis" | "costs" | "trash" | "references";
 type TrashResult = { reports: Report[]; nextCursor?: string | null; total?: number };
 type ReportAction = "trash_report" | "restore_report" | "delete_report";
 type ReportState = { state: "active" | "trashed" | "deleted" | "missing"; report?: Report };
@@ -687,6 +688,7 @@ export default function App() {
       <div className="side-label">WORKSPACE</div>
       <button className={`side-item ${page === "analysis" ? "active" : ""}`} onClick={() => setPage("analysis")}><span>◉</span>店舗分析</button>
       <button className={`side-item ${page === "costs" ? "active" : ""}`} onClick={() => { setPage("costs"); void refreshCosts(); }}><span>＄</span>API料金</button>
+      <button className={`side-item ${page === "references" ? "active" : ""}`} onClick={() => setPage("references")}><FileIcon/>参照ファイル</button>
       <button className={`side-item trash-nav ${page === "trash" ? "active" : ""}`} onClick={() => { setPage("trash"); void refreshTrash(); }}><TrashIcon/>ゴミ箱 <span className="trash-nav-count">{trashCount}</span></button>
       {page === "analysis" && <><div className="side-label history-label">保存したレポート <span>{reports.length}</span></div>
       <div className="history-filters" role="tablist" aria-label="レポートの種類">
@@ -707,10 +709,10 @@ export default function App() {
     </aside>
 
     <main id="top" className="main-area">
-      <header className="topbar"><div><span className="eyebrow">RESTAURANT INTELLIGENCE</span><h1>{page === "costs" ? "API料金・利用量" : page === "trash" ? "ゴミ箱" : "店舗分析"}</h1></div><div className="account-chip"><span>{displayLoginId(session.user.email)}</span><button onClick={() => void supabase.auth.signOut()}>ログアウト</button></div></header>
+      <header className="topbar"><div><span className="eyebrow">RESTAURANT INTELLIGENCE</span><h1>{page === "costs" ? "API料金・利用量" : page === "trash" ? "ゴミ箱" : page === "references" ? "参照ファイル" : "店舗分析"}</h1></div><div className="account-chip"><span>{displayLoginId(session.user.email)}</span><button onClick={() => void supabase.auth.signOut()}>ログアウト</button></div></header>
       {reportNotice && <div className={`report-action-notice ${reportNotice.uncertain ? "uncertain" : "success"}`} role="status"><span>{reportNotice.text}</span>{reportNotice.uncertain && <button type="button" disabled={!!busyReportId} onClick={() => { const id = currentUserId.current; if (id) void refresh(id, authEpoch.current); void refreshTrash(); }}>一覧を更新</button>}<button type="button" aria-label="通知を閉じる" onClick={() => setReportNotice(null)}>×</button></div>}
 
-      {page === "costs" ? <CostPage key={session.user.id} reports={[...reports, ...trashedReports]} costs={costs} loading={costLoading} error={costError} onRefresh={refreshCosts} /> : page === "trash" ? <TrashPage reports={trashedReports} loading={trashLoading} busy={!!busyReportId || working === "question"} error={trashError} onRestore={(report) => { void changeReport("restore_report", report); }} onDelete={setDeleteTarget} onRefresh={() => { void refreshTrash(); }} hasMore={!!trashCursor} onLoadMore={() => { void refreshTrash(true); }}/> : <div className={`content-grid ${selected ? "has-report" : ""}`}>
+      {page === "costs" ? <CostPage key={session.user.id} reports={[...reports, ...trashedReports]} costs={costs} loading={costLoading} error={costError} onRefresh={refreshCosts} /> : page === "references" ? <ReferenceFilesPage userId={session.user.id} /> : page === "trash" ? <TrashPage reports={trashedReports} loading={trashLoading} busy={!!busyReportId || working === "question"} error={trashError} onRestore={(report) => { void changeReport("restore_report", report); }} onDelete={setDeleteTarget} onRefresh={() => { void refreshTrash(); }} hasMore={!!trashCursor} onLoadMore={() => { void refreshTrash(true); }}/> : <div className={`content-grid ${selected ? "has-report" : ""}`}>
         {selected && <div className="research-toolbar"><span>保存済みレポートを表示しています</span><button onClick={() => {
           if (!researchExpanded && selected) {
             setStoreName(selected.storeName); setStoreUrl(selected.storeUrl); setGroupName(selected.groupName ?? "");
@@ -725,7 +727,7 @@ export default function App() {
         <section id="research-controls" className={`control-column ${selected && !researchExpanded ? "research-collapsed" : ""}`}>
           <form className="panel form-panel" onSubmit={startAnalysis}>
             <div className="panel-kicker">新しいリサーチ</div><h2>調べたいお店を指定</h2>
-            <p className="muted form-intro">専門分野の異なる3つのAIが調査し、根拠を確認してひとつの改善レポートにまとめます。</p>
+            <p className="muted form-intro">専門分野の異なる3つのAIが調査し、根拠を確認してひとつの改善レポートにまとめます。</p><p className="analysis-reference-note">分析の開始前に、参照ファイルのうち有効なものを読み込み、掲載文のNGワード・推奨ワード・改善案内と照合します。「参照ファイル」から追加・削除できます。</p>
             <StoreNameInput value={storeName} onChange={setStoreName} onSelectStore={(store) => {
               setStoreUrl(store.url);
               setSiteUrls((urls) => ({ ...urls, tabelog: store.tabelogUrl, google_maps: store.googleMapsUrl }));

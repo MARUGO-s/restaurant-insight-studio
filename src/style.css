@@ -245,3 +245,50 @@ html{scroll-behavior:smooth;scroll-padding-top:100px}body{min-width:320px}.app-s
 .merge-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .merge-dialog-head h2{margin:6px 0 0}
 .merge-empty-note{background:#f4f3fa;border:1px solid #d7d4e8;color:#3d3a6e;border-radius:8px;padding:10px 12px;font-size:11px;line-height:1.7;margin:0 0 8px}
+
+.reference-page{max-width:1480px;margin:0 auto;padding:30px 36px 50px;min-width:0}
+.reference-page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:18px}
+.reference-page-heading h2{font-size:25px;margin:7px 0;letter-spacing:-.04em}
+.reference-page-heading p{font-size:13px;line-height:1.9;color:#7d8874;margin:6px 0 0;max-width:720px}
+.reference-guidance{padding:15px 18px;border:1px solid #e4e9df;border-radius:8px;background:#f0f3ec;margin:20px 0 25px;font-size:13px;line-height:1.9;color:#7d8874}
+.reference-form{margin-bottom:22px}
+.reference-form h3{font-size:18px;margin:6px 0 0}
+.reference-fieldset{border:0;padding:0;margin:0 0 16px}
+.reference-fieldset legend{font-size:10px;font-weight:600;color:#626960;margin-bottom:8px}
+.reference-chip-row{display:flex;flex-wrap:wrap;gap:8px}
+.reference-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #e2e6df;border-radius:999px;padding:6px 10px;font-size:11px;font-weight:600;color:#5a655c;background:#fff;cursor:pointer}
+.reference-chip.selected{background:#edf2ed;border-color:#c5d3c6;color:#344a3b}
+.reference-chip input{margin:0}
+.reference-form .reference-upload input{height:auto;padding:8px 0;border:0;box-shadow:none}
+.reference-form textarea{display:block;width:100%;min-height:220px;border:1px solid #e4e7e1;border-radius:6px;background:#fff;padding:10px;margin-top:6px;color:#303830;font:inherit;font-size:12px;line-height:1.7;resize:vertical}
+.reference-form-error{color:#ac5144;font-size:11px;margin:0 0 10px}
+.reference-form-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:12px}
+.reference-layout{display:grid;grid-template-columns:minmax(240px,340px) minmax(0,1fr);gap:18px;align-items:start}
+.reference-list{display:grid;gap:10px}
+.reference-card{width:100%;text-align:left;padding:14px 16px;border:1px solid var(--line);background:#fff;color:inherit}
+.reference-card.selected{border-color:#8aa58c;box-shadow:0 0 0 3px #edf2ed}
+.reference-card.inactive{opacity:.72}
+.reference-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.reference-card-top b{flex:1;min-width:0;font-size:13px;line-height:1.5}
+.reference-card-top .source-badge{flex:none;margin-top:2px}
+.reference-card b{font-size:13px;line-height:1.5}
+.reference-card small{display:block;color:#8a9086;font-size:10px;margin-top:6px}
+.reference-card p{margin:8px 0 0;font-size:11px;line-height:1.7;color:#626960}
+.reference-detail{padding:22px;min-height:280px}
+.reference-detail header h3{font-size:20px;margin:6px 0 0}
+.reference-content{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:12px;line-height:1.8;color:#303830;margin:18px 0;max-height:min(70vh,720px);overflow:auto;background:#fafbf9;border:1px solid #eef0eb;border-radius:8px;padding:16px}
+.reference-detail-actions{display:flex;flex-wrap:wrap;gap:10px}
+.reference-empty{padding:28px 18px;text-align:center;color:#7d8874}
+.reference-empty h3{margin:0 0 8px;font-size:16px;color:#344a3b}
+.reference-empty p{margin:0;font-size:12px;line-height:1.8}
+.reference-used{margin:0 0 16px;padding:12px 14px;border:1px solid #e4e9df;border-radius:8px;background:#f7f9f5}
+.reference-used summary{cursor:pointer;font-size:12px;font-weight:700;color:#344a3b}
+.reference-used ul{margin:8px 0 0;padding:0 0 0 18px;font-size:11px;line-height:1.8;color:#5a655c}
+.analysis-reference-note{font-size:11px;line-height:1.7;color:#626960;margin:0 0 12px}
+@media(max-width:800px){
+  .reference-page{padding:21px 16px 36px}
+  .reference-page-heading{flex-direction:column;align-items:flex-start}
+  .reference-page-heading .primary-button{width:100%}
+  .reference-layout{grid-template-columns:1fr}
+  .reference-content{max-height:50vh}
+}

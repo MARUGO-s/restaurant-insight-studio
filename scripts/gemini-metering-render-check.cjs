@@ -41,6 +41,8 @@ function loadComponent(file, extraSource = "") {
     if (name === "./lib/remembered-login") return loadComponent("lib/remembered-login.ts");
     if (name === "./LoginForm") return loadComponent("LoginForm.tsx");
     if (name === "./MergeDialog") return loadComponent("MergeDialog.tsx");
+    if (name === "./ReferenceFilesPage") return loadComponent("ReferenceFilesPage.tsx");
+    if (name === "./lib/reference-files") return loadComponent("lib/reference-files.ts");
     if (name === "../supabase/functions/restaurant-analysis/merge-sites") return loadComponent("../supabase/functions/restaurant-analysis/merge-sites.ts");
     if (name === "./ProviderDiagnostics") return loadComponent("ProviderDiagnostics.tsx");
     return require(name);
