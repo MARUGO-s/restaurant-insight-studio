@@ -7,9 +7,10 @@
     "dev": "vite --host localhost",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test:report": "node scripts/report-render-check.cjs && node scripts/remembered-login-check.cjs",
+    "test:report": "node scripts/report-render-check.cjs && node scripts/remembered-login-check.cjs && node scripts/merge-dialog-check.cjs",
     "test:remembered-login": "node scripts/remembered-login-check.cjs",
-    "test:gemini-metering": "node scripts/gemini-metering-render-check.cjs && node scripts/remembered-login-check.cjs"
+    "test:gemini-metering": "node scripts/gemini-metering-render-check.cjs && node scripts/remembered-login-check.cjs && node scripts/merge-dialog-check.cjs",
+    "test:merge-dialog": "node scripts/merge-dialog-check.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",

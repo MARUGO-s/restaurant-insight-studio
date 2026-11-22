@@ -40,6 +40,7 @@ function loadComponent(file, extraSource = "") {
     if (name === "./lib/costs") return loadComponent("lib/costs.ts");
     if (name === "./lib/remembered-login") return loadComponent("lib/remembered-login.ts");
     if (name === "./LoginForm") return loadComponent("LoginForm.tsx");
+    if (name === "./MergeDialog") return loadComponent("MergeDialog.tsx");
     if (name === "./ProviderDiagnostics") return loadComponent("ProviderDiagnostics.tsx");
     return require(name);
   };
