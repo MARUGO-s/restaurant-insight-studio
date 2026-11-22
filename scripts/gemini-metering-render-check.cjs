@@ -38,6 +38,8 @@ function loadComponent(file, extraSource = "") {
   loaded.require = (name) => {
     if (Object.hasOwn(browserModules, name)) return browserModules[name];
     if (name === "./lib/costs") return loadComponent("lib/costs.ts");
+    if (name === "./lib/remembered-login") return loadComponent("lib/remembered-login.ts");
+    if (name === "./LoginForm") return loadComponent("LoginForm.tsx");
     if (name === "./ProviderDiagnostics") return loadComponent("ProviderDiagnostics.tsx");
     return require(name);
   };
